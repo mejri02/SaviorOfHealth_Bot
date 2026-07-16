@@ -1,0 +1,48 @@
+{
+  "name": "saviorofhealth-bot",
+  "version": "2.0.0",
+  "description": "SaviorOfHealth Bot - Automate earning Heal Points with AI-powered health tracking",
+  "main": "index.js",
+  "bin": {
+    "savior-bot": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node test-failed.js",
+    "test:full": "node test.js",
+    "bot": "node index.js",
+    "proxy": "node index.js --proxy"
+  },
+  "keywords": [
+    "saviorofhealth",
+    "health-bot",
+    "heal-points",
+    "web3-health",
+    "automation",
+    "ai-health",
+    "crypto-health",
+    "blockchain-health"
+  ],
+  "author": "mejri02",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mejri02/SaviorOfHealth_Bot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mejri02/SaviorOfHealth_Bot/issues"
+  },
+  "homepage": "https://github.com/mejri02/SaviorOfHealth_Bot#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ethers": "^6.11.1",
+    "socks-proxy-agent": "^8.0.2",
+    "https-proxy-agent": "^7.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0"
+  }
+}

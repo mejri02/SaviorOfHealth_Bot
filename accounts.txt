@@ -1,0 +1,4 @@
+# Add your private keys here (one per line)
+# Format: privateKey or privateKey:name
+0xabc123...:MyMainWallet
+0xdef456...
