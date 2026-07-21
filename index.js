@@ -24,6 +24,7 @@ function loadConfig() {
     processNutrition: true,
     processMindspace: true,
     processTriage: true,
+    processAgents: true,
     stakeGoals: true,
     stakeAmount: 10,
     autoStake: true,
@@ -47,7 +48,7 @@ function loadConfig() {
 
   if (!fs.existsSync(CONFIG_FILE)) {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2), 'utf8');
-    console.log('📄 Created config.json with default settings');
+    console.log('Created config.json with default settings');
     return defaultConfig;
   }
 
@@ -55,7 +56,7 @@ function loadConfig() {
     const config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
     return { ...defaultConfig, ...config };
   } catch (error) {
-    console.log('❌ Error loading config.json, using defaults');
+    console.log('Error loading config.json, using defaults');
     return defaultConfig;
   }
 }
@@ -70,6 +71,7 @@ const COLORS = {
   green: '\x1b[32m',
   yellow: '\x1b[33m',
   blue: '\x1b[34m',
+  brightBlue: '\x1b[94m',
   magenta: '\x1b[35m',
   cyan: '\x1b[36m',
   gray: '\x1b[90m',
@@ -106,6 +108,7 @@ function log(message, type = 'info', data = null) {
     water: { color: COLORS.brightBlue, icon: '💧' },
     mood: { color: COLORS.brightMagenta, icon: '😊' },
     skip: { color: COLORS.brightYellow, icon: '⏭️' },
+    agent: { color: COLORS.brightMagenta, icon: '🤖' },
   };
   const style = styles[type] || styles.info;
   const prefix = `${style.color}${style.icon}${COLORS.reset}`;
@@ -115,9 +118,9 @@ function log(message, type = 'info', data = null) {
 }
 
 function logBanner(message) {
-  console.log(`\n${COLORS.brightCyan}${'═'.repeat(60)}${COLORS.reset}`);
+  console.log(`\n${COLORS.brightCyan}${'='.repeat(60)}${COLORS.reset}`);
   console.log(`${COLORS.brightYellow}  ${message}  ${COLORS.reset}`);
-  console.log(`${COLORS.brightCyan}${'═'.repeat(60)}${COLORS.reset}\n`);
+  console.log(`${COLORS.brightCyan}${'='.repeat(60)}${COLORS.reset}\n`);
 }
 
 function sleep(ms) {
@@ -171,7 +174,7 @@ function saveResults(data) {
   try {
     fs.writeFileSync(RESULTS_FILE, JSON.stringify(data, null, 2), 'utf8');
   } catch (error) {
-    log(`Failed to save results: ${error.message}`, 'warning');
+    log('Failed to save results: ' + error.message, 'warning');
   }
 }
 
@@ -180,10 +183,10 @@ function generateSIWEMessage(address, chainId) {
   return [
     'saviorofhealth wants you to sign in with your wallet.',
     '',
-    `Address: ${address}`,
-    `Chain ID: ${chainId || 56}`,
-    `Nonce: ${nonce}`,
-    `Issued At: ${Date.now()}`,
+    'Address: ' + address,
+    'Chain ID: ' + (chainId || 56),
+    'Nonce: ' + nonce,
+    'Issued At: ' + Date.now(),
     '',
     'This is a free, gas-less signature. It only proves you own this wallet. No transaction is sent.'
   ].join('\n');
@@ -220,13 +223,13 @@ class ProxyManager {
           }
         }
         if (this.proxies.length > 0) {
-          log(`📋 Loaded ${this.proxies.length} proxies`, 'success');
+          log('Loaded ' + this.proxies.length + ' proxies', 'success');
           return true;
         }
       }
       return false;
     } catch (error) {
-      log(`Failed to load proxies: ${error.message}`, 'warning');
+      log('Failed to load proxies: ' + error.message, 'warning');
       return false;
     }
   }
@@ -272,14 +275,14 @@ class ProxyManager {
     if (!proxy) return null;
     try {
       if (proxy.type === 'socks5') {
-        let url = `socks5://`;
-        if (proxy.username && proxy.password) url += `${proxy.username}:${proxy.password}@`;
-        url += `${proxy.host}:${proxy.port}`;
+        let url = 'socks5://';
+        if (proxy.username && proxy.password) url += proxy.username + ':' + proxy.password + '@';
+        url += proxy.host + ':' + proxy.port;
         return new SocksProxyAgent(url);
       } else {
-        let url = `http://`;
-        if (proxy.username && proxy.password) url += `${proxy.username}:${proxy.password}@`;
-        url += `${proxy.host}:${proxy.port}`;
+        let url = 'http://';
+        if (proxy.username && proxy.password) url += proxy.username + ':' + proxy.password + '@';
+        url += proxy.host + ':' + proxy.port;
         return new HttpsProxyAgent(url);
       }
     } catch (error) {
@@ -317,14 +320,14 @@ class GroqManager {
           }
         }
         if (this.apiKeys.length > 0) {
-          log(`📋 Loaded ${this.apiKeys.length} Groq API keys`, 'success');
+          log('Loaded ' + this.apiKeys.length + ' Groq API keys', 'success');
           return true;
         }
       }
-      log(`⚠️ No Groq API keys found in groq.txt`, 'warning');
+      log('No Groq API keys found in groq.txt', 'warning');
       return false;
     } catch (error) {
-      log(`Failed to load Groq API keys: ${error.message}`, 'warning');
+      log('Failed to load Groq API keys: ' + error.message, 'warning');
       return false;
     }
   }
@@ -346,20 +349,21 @@ class GroqManager {
   }
 
   getCurrentModel() {
+    if (this.models.length === 0) return null;
     return this.models[this.currentModelIndex] || this.models[0];
   }
 
   rotateKey() {
     if (this.apiKeys.length === 0) return null;
     this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
-    log(`🔄 Rotated API key`, 'rotate');
+    log('Rotated API key', 'rotate');
     return this.apiKeys[this.currentKeyIndex];
   }
 
   rotateModel() {
     if (this.models.length === 0) return null;
     this.currentModelIndex = (this.currentModelIndex + 1) % this.models.length;
-    log(`🔄 Rotated model: ${this.models[this.currentModelIndex]}`, 'rotate');
+    log('Rotated model: ' + this.models[this.currentModelIndex], 'rotate');
     return this.models[this.currentModelIndex];
   }
 
@@ -380,12 +384,7 @@ class GroqManager {
       }
 
       try {
-        const prompt = `You are answering health survey questions. Answer naturally and concisely.
-
-Question: ${question}
-${options ? `Options: ${options.join(', ')}` : ''}
-
-${options ? 'Respond with ONLY the option text you choose, nothing else.' : 'Give a 1-3 word honest response.'}`;
+        const prompt = "You are answering health survey questions. Answer naturally and concisely.\n\nQuestion: " + question + "\n" + (options ? "Options: " + options.join(", ") : "") + "\n\n" + (options ? "Respond with ONLY the option text you choose, nothing else." : "Give a 1-3 word honest response.");
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), CONFIG.groqTimeout || 10000);
@@ -394,7 +393,7 @@ ${options ? 'Respond with ONLY the option text you choose, nothing else.' : 'Giv
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${key}`,
+            'Authorization': 'Bearer ' + key,
             'User-Agent': getRandomUserAgent(),
           },
           body: JSON.stringify({
@@ -452,7 +451,7 @@ ${options ? 'Respond with ONLY the option text you choose, nothing else.' : 'Giv
         }
 
         if (data.error) {
-          if (data.error.message?.includes('rate') || data.error.message?.includes('quota')) {
+          if (data.error.message && (data.error.message.includes('rate') || data.error.message.includes('quota'))) {
             this.markKeyRateLimited(key);
           } else {
             this.rotateKey();
@@ -463,11 +462,11 @@ ${options ? 'Respond with ONLY the option text you choose, nothing else.' : 'Giv
 
       } catch (error) {
         if (error.name === 'AbortError') {
-          log(`⏱️ Groq request timeout (${CONFIG.groqTimeout}ms)`, 'warning');
+          log('Groq request timeout (' + CONFIG.groqTimeout + 'ms)', 'warning');
           this.rotateKey();
           this.rotateModel();
         } else {
-          log(`Groq request error: ${error.message}`, 'warning');
+          log('Groq request error: ' + error.message, 'warning');
           this.rotateKey();
         }
         await sleep(1000);
@@ -524,7 +523,7 @@ class ApiClient {
     }
     this.lastRequestTime = now;
 
-    const url = `${CONFIG.apiUrl}${endpoint}`;
+    const url = CONFIG.apiUrl + endpoint;
     const headers = {
       'Content-Type': 'application/json',
       'User-Agent': this.userAgent,
@@ -533,13 +532,12 @@ class ApiClient {
     };
     
     if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+      headers['Authorization'] = 'Bearer ' + this.token;
     }
 
     const fetchOptions = { 
       ...options, 
       headers,
-      timeout: CONFIG.requestTimeout || 60000,
     };
 
     if (this.proxyManager) {
@@ -565,13 +563,13 @@ class ApiClient {
       }
 
       if (response.status === 504 || response.status === 502 || response.status === 503) {
-        log(`⚠️ Gateway error (${response.status}) on ${endpoint}`, 'warning');
-        throw new Error(`GATEWAY_ERROR`);
+        log('Gateway error (' + response.status + ') on ' + endpoint, 'warning');
+        throw new Error('GATEWAY_ERROR');
       }
 
       if (response.status === 500) {
-        log(`⚠️ Server error (500) on ${endpoint}`, 'warning');
-        throw new Error(`SERVER_ERROR`);
+        log('Server error (500) on ' + endpoint, 'warning');
+        throw new Error('SERVER_ERROR');
       }
 
       const text = await response.text();
@@ -582,20 +580,20 @@ class ApiClient {
 
       if (!contentType.includes('application/json')) {
         if (text.includes('<html') || text.includes('<!DOCTYPE')) {
-          throw new Error(`HTML response received (status ${response.status})`);
+          throw new Error('HTML response received (status ' + response.status + ')');
         }
-        throw new Error(`Non-JSON response: ${text.substring(0, 100)}`);
+        throw new Error('Non-JSON response: ' + text.substring(0, 100));
       }
 
       let data;
       try {
         data = JSON.parse(text);
       } catch (e) {
-        throw new Error(`Invalid JSON: ${text.substring(0, 100)}`);
+        throw new Error('Invalid JSON: ' + text.substring(0, 100));
       }
 
       if (!response.ok) {
-        throw new Error(data.error?.message || data.message || `HTTP ${response.status}`);
+        throw new Error(data.error && data.error.message ? data.error.message : data.message || 'HTTP ' + response.status);
       }
 
       await sleep(randomDelay(200, 600));
@@ -625,13 +623,13 @@ class ApiClient {
         if (error.message.includes('400') || error.message.includes('422')) throw error;
         
         if ((error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') && CONFIG.skipOnServerError) {
-          log(`⏭️ Server/gateway error, skipping this request`, 'skip');
+          log('Server/gateway error, skipping this request', 'skip');
           return null;
         }
         
         if (attempt < maxRetries) {
           const delay = retryDelay * Math.pow(1.5, attempt - 1);
-          log(`🔄 Retry ${attempt}/${maxRetries} for ${endpoint} in ${Math.round(delay/1000)}s...`, 'warning');
+          log('Retry ' + attempt + '/' + maxRetries + ' for ' + endpoint + ' in ' + Math.round(delay/1000) + 's...', 'warning');
           await sleep(delay);
         }
       }
@@ -651,27 +649,34 @@ class BadgeClaimer {
   }
 
   async init() {
-    this.wallet = new ethers.Wallet(this.privateKey);
-    
-    let providerOptions = {};
-    if (this.proxyManager) {
-      const proxy = this.proxyManager.getRandomProxy();
-      if (proxy) {
-        const agent = this.proxyManager.getAgent(proxy);
-        if (agent) {
-          providerOptions.agent = agent;
+    try {
+      this.wallet = new ethers.Wallet(this.privateKey);
+      
+      let providerOptions = {};
+      if (this.proxyManager) {
+        const proxy = this.proxyManager.getRandomProxy();
+        if (proxy) {
+          const agent = this.proxyManager.getAgent(proxy);
+          if (agent) {
+            providerOptions.agent = agent;
+          }
         }
       }
+      
+      this.provider = new ethers.JsonRpcProvider(CONFIG.bscRpc, undefined, providerOptions);
+      this.wallet = this.wallet.connect(this.provider);
+      
+      const abi = [
+        'function claim(string badgeKey, bytes signature) external',
+        'function hasClaimed(address wallet, string badgeKey) view returns (bool)'
+      ];
+      this.contract = new ethers.Contract(CONFIG.badgeContract, abi, this.wallet);
+      
+      return true;
+    } catch (error) {
+      log('BadgeClaimer init failed: ' + error.message, 'error');
+      return false;
     }
-    
-    this.provider = new ethers.JsonRpcProvider(CONFIG.bscRpc, undefined, providerOptions);
-    this.wallet = this.wallet.connect(this.provider);
-    
-    const abi = [
-      'function claim(string badgeKey, bytes signature) external',
-      'function hasClaimed(address wallet, string badgeKey) view returns (bool)'
-    ];
-    this.contract = new ethers.Contract(CONFIG.badgeContract, abi, this.wallet);
   }
 
   async getBalance() {
@@ -686,16 +691,16 @@ class BadgeClaimer {
         gasPrice: gasPrice.gasPrice,
       });
       
-      log(`  ⛓️ Transaction sent: ${tx.hash.substring(0, 20)}...`, 'debug');
+      log('  Transaction sent: ' + tx.hash.substring(0, 20) + '...', 'debug');
       const receipt = await tx.wait(1);
       
       if (receipt.status === 1) {
-        log(`  ✅ Badge claimed on-chain!`, 'success');
+        log('  Badge claimed on-chain!', 'success');
         return receipt.transactionHash;
       }
       return null;
     } catch (error) {
-      log(`  ❌ Claim failed: ${error.message}`, 'error');
+      log('  Claim failed: ' + error.message, 'error');
       return null;
     }
   }
@@ -707,6 +712,8 @@ class SaviorOfHealthBot {
     this.apiClient = new ApiClient(this.proxyManager);
     this.groq = new GroqManager();
     this.wallet = null;
+    this.provider = null;
+    this.privateKey = null;
     this.address = null;
     this.balance = 0;
     this.earnedToday = 0;
@@ -740,6 +747,8 @@ class SaviorOfHealthBot {
       stakesPlaced: 0,
       stakesWon: 0,
       stakesLost: 0,
+      agentChats: 0,
+      agentRewards: 0,
     };
   }
 
@@ -749,20 +758,20 @@ class SaviorOfHealthBot {
         return true;
       }
 
-      const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
-      this.wallet = new ethers.Wallet(pk);
+      const pk = privateKey.startsWith('0x') ? privateKey : '0x' + privateKey;
+      this.privateKey = pk;
+      
+      if (!this.provider) {
+        this.provider = new ethers.JsonRpcProvider(CONFIG.bscRpc);
+      }
+      
+      this.wallet = new ethers.Wallet(pk, this.provider);
       this.address = this.wallet.address;
       
-      const shortAddr = `${this.address.substring(0, 8)}...${this.address.substring(this.address.length - 6)}`;
-      log(`🔑 ${shortAddr}`, 'info');
+      const shortAddr = this.address.substring(0, 8) + '...' + this.address.substring(this.address.length - 6);
+      log('Key ' + shortAddr, 'info');
       
       let chainId = CONFIG.chainId || 56;
-      if (this.provider) {
-        try {
-          const network = await this.provider.getNetwork();
-          chainId = Number(network.chainId);
-        } catch (e) {}
-      }
       
       const message = generateSIWEMessage(this.address, chainId);
       const signature = await this.wallet.signMessage(message);
@@ -777,18 +786,18 @@ class SaviorOfHealthBot {
       }
       
       this.apiClient.setToken(response.token);
-      this.balance = response.user?.tokenBalance || 0;
+      this.balance = response.user && response.user.tokenBalance ? response.user.tokenBalance : 0;
       this.chainId = chainId;
       
-      log(`✅ Authenticated (Chain: ${chainId})`, 'success');
+      log('Authenticated (Chain: ' + chainId + ')', 'success');
       return true;
       
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') {
-        log(`🔄 Token expired, re-authenticating...`, 'warning');
+        log('Token expired, re-authenticating...', 'warning');
         return this.login(privateKey, true);
       }
-      log(`❌ Auth failed: ${error.message}`, 'error');
+      log('Auth failed: ' + error.message, 'error');
       return false;
     }
   }
@@ -803,7 +812,7 @@ class SaviorOfHealthBot {
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
-      log(`Failed to fetch deck: ${error.message}`, 'error');
+      log('Failed to fetch deck: ' + error.message, 'error');
       return null;
     }
   }
@@ -842,20 +851,20 @@ class SaviorOfHealthBot {
       if (error.message === 'AUTH_EXPIRED') throw error;
       
       if ((error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') && CONFIG.skipOnServerError) {
-        log(`  ⏭️ Server/gateway error, skipping this card`, 'skip');
+        log('  Server/gateway error, skipping this card', 'skip');
         const card = this.cards.find(c => c.id === cardId);
         if (card) card.answered = true;
         return { ok: true, reward: 0, skipped: true };
       }
       
       if (error.message.includes('Empty response') || error.message.includes('Invalid JSON') || error.message.includes('HTML response')) {
-        log(`  ⚠️ Invalid response. Skipping card.`, 'warning');
+        log('  Invalid response. Skipping card.', 'warning');
         const card = this.cards.find(c => c.id === cardId);
         if (card) card.answered = true;
         return { ok: true, reward: 0, skipped: true };
       }
       
-      log(`  ❌ Failed to answer card: ${error.message}`, 'error');
+      log('  Failed to answer card: ' + error.message, 'error');
       const card = this.cards.find(c => c.id === cardId);
       if (card) card.answered = true;
       return null;
@@ -864,11 +873,11 @@ class SaviorOfHealthBot {
 
   async processDeck() {
     if (!CONFIG.processDeck) {
-      log(`⏭️ Deck processing disabled`, 'warning');
+      log('Deck processing disabled', 'warning');
       return 0;
     }
 
-    logBanner('🃏 Processing Daily Deck');
+    logBanner('Processing Daily Deck');
     
     let cardCount = 0;
     let attempts = 0;
@@ -887,7 +896,7 @@ class SaviorOfHealthBot {
       cardCount++;
       
       const preview = card.question ? card.question.substring(0, 35) : 'Question';
-      log(`📝 ${cardCount}/${this.cards.length}: ${preview}...`, 'info');
+      log('' + cardCount + '/' + this.cards.length + ': ' + preview + '...', 'info');
       
       let answer = null;
       let guess = null;
@@ -910,8 +919,8 @@ class SaviorOfHealthBot {
         }
         
         this.dailyStats.aiAnswers++;
-        log(`  🤖 Answer: ${answer}`, 'debug');
-        if (guess) log(`  🎯 Guess: ${guess}%`, 'debug');
+        log('  Answer: ' + answer, 'debug');
+        if (guess) log('  Guess: ' + guess + '%', 'debug');
       } else {
         if (card.type === 'task') {
           answer = 'done';
@@ -929,24 +938,25 @@ class SaviorOfHealthBot {
       
       if (result && result.ok !== false) {
         consecutiveFailures = 0;
+        serverErrorCount = 0;
         if (result.reward) {
-          log(`  ${COLORS.brightYellow}🪙 +${result.reward} HP${COLORS.reset} (Balance: ${COLORS.brightWhite}${formatNumber(this.balance)}${COLORS.reset})`, 'success');
+          log('  +' + result.reward + ' HP (Balance: ' + formatNumber(this.balance) + ')', 'success');
           if (result.accuracy !== undefined && result.accuracy !== null) {
-            log(`  📊 Accuracy: ${result.accuracy}%`, 'debug');
+            log('  Accuracy: ' + result.accuracy + '%', 'debug');
           }
         }
       } else {
         consecutiveFailures++;
         serverErrorCount++;
-        log(`  ⚠️ Failed to answer card (${consecutiveFailures} consecutive failures)`, 'warning');
+        log('  Failed to answer card (' + consecutiveFailures + ' consecutive failures)', 'warning');
         
         if (serverErrorCount >= 5) {
-          log(`  ⛔ Too many server errors (${serverErrorCount}), stopping deck processing`, 'error');
+          log('  Too many server errors (' + serverErrorCount + '), stopping deck processing', 'error');
           break;
         }
         
         if (consecutiveFailures >= 3) {
-          log(`  ⛔ Too many failures, skipping remaining cards`, 'error');
+          log('  Too many failures, skipping remaining cards', 'error');
           break;
         }
       }
@@ -955,9 +965,9 @@ class SaviorOfHealthBot {
     }
     
     if (cardCount > 0) {
-      log(`✅ Completed ${cardCount} cards`, 'success');
+      log('Completed ' + cardCount + ' cards', 'success');
     } else {
-      log(`📭 No new cards available`, 'info');
+      log('No new cards available', 'info');
     }
     
     return cardCount;
@@ -970,18 +980,18 @@ class SaviorOfHealthBot {
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
-      log(`Failed to fetch campaigns: ${error.message}`, 'error');
+      log('Failed to fetch campaigns: ' + error.message, 'error');
       return null;
     }
   }
 
   async processCampaigns() {
     if (!CONFIG.processCampaigns) {
-      log(`⏭️ Campaign processing disabled`, 'warning');
+      log('Campaign processing disabled', 'warning');
       return 0;
     }
 
-    logBanner('🏥 Processing Clinic Campaigns');
+    logBanner('Processing Clinic Campaigns');
     
     await this.fetchCampaigns();
     
@@ -991,7 +1001,7 @@ class SaviorOfHealthBot {
     });
     
     if (activeCampaigns.length === 0) {
-      log(`📭 No active campaigns`, 'info');
+      log('No active campaigns', 'info');
       return 0;
     }
     
@@ -1001,12 +1011,12 @@ class SaviorOfHealthBot {
     
     for (const campaign of activeCampaigns) {
       if (serverErrorCount >= 3) {
-        log(`⛔ Too many server errors, stopping campaigns`, 'error');
+        log('Too many server errors, stopping campaigns', 'error');
         break;
       }
       
-      const title = campaign.title?.substring(0, 35) || campaign.key || 'Campaign';
-      log(`📋 ${title}...`, 'info');
+      const title = campaign.title ? campaign.title.substring(0, 35) : campaign.key || 'Campaign';
+      log('' + title + '...', 'info');
       
       try {
         const startData = await this.apiClient.requestWithRetry('/api/earn/log-chat', {
@@ -1026,13 +1036,13 @@ class SaviorOfHealthBot {
             this.dailyStats.aiAttempts++;
             
             if (currentAsk.kind === 'text') {
-              answer = await this.groq.ask(currentAsk.options?.[0] || 'How are you?', null, this.proxyManager);
+              answer = await this.groq.ask(currentAsk.options && currentAsk.options[0] ? currentAsk.options[0] : 'How are you?', null, this.proxyManager);
               if (!answer) answer = 'I feel healthy today.';
             } else if (currentAsk.kind === 'multi') {
               const shuffled = [...currentAsk.options].sort(() => Math.random() - 0.5);
               answer = shuffled.slice(0, Math.min(currentAsk.options.length, 1 + Math.floor(Math.random() * 2)));
             } else {
-              answer = await this.groq.ask(currentAsk.options?.[0] || 'How are you?', currentAsk.options, this.proxyManager);
+              answer = await this.groq.ask(currentAsk.options && currentAsk.options[0] ? currentAsk.options[0] : 'How are you?', currentAsk.options, this.proxyManager);
               if (!answer) answer = currentAsk.options[Math.floor(Math.random() * currentAsk.options.length)];
             }
             this.dailyStats.aiAnswers++;
@@ -1062,10 +1072,10 @@ class SaviorOfHealthBot {
             this.totalEarned += response.reward;
             campaignReward += response.reward;
             this.dailyStats.totalCampaignsCompleted++;
-            log(`  ${COLORS.brightYellow}🪙 +${response.reward} HP${COLORS.reset}`, 'success');
+            log('  +' + response.reward + ' HP', 'success');
           }
           
-          currentAsk = response?.ask;
+          currentAsk = response && response.ask ? response.ask : null;
           await sleep(randomDelay(500, 1500));
         }
         
@@ -1073,7 +1083,7 @@ class SaviorOfHealthBot {
         this.completedCampaigns.push(campaign.key);
         
         if (campaignReward > 0) {
-          log(`✅ +${campaignReward} HP from campaign`, 'success');
+          log('+ ' + campaignReward + ' HP from campaign', 'success');
           totalReward += campaignReward;
         }
         
@@ -1081,9 +1091,9 @@ class SaviorOfHealthBot {
         if (error.message === 'AUTH_EXPIRED') throw error;
         if (error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') {
           serverErrorCount++;
-          log(`⚠️ Server/gateway error on campaign (${serverErrorCount}/3)`, 'warning');
+          log('Server/gateway error on campaign (' + serverErrorCount + '/3)', 'warning');
         } else {
-          log(`❌ Campaign failed: ${error.message}`, 'error');
+          log('Campaign failed: ' + error.message, 'error');
         }
       }
       
@@ -1091,7 +1101,7 @@ class SaviorOfHealthBot {
     }
     
     if (completed > 0) {
-      log(`✅ Completed ${completed} campaigns (${totalReward} HP)`, 'success');
+      log('Completed ' + completed + ' campaigns (' + totalReward + ' HP)', 'success');
     }
     
     return completed;
@@ -1104,32 +1114,32 @@ class SaviorOfHealthBot {
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
-      log(`Failed to fetch badges: ${error.message}`, 'error');
+      log('Failed to fetch badges: ' + error.message, 'error');
       return null;
     }
   }
 
   async processBadges() {
     if (!CONFIG.claimBadges) {
-      log(`⏭️ Badge claiming disabled`, 'warning');
+      log('Badge claiming disabled', 'warning');
       return 0;
     }
 
-    logBanner('🏅 Checking Badges');
+    logBanner('Checking Badges');
     
     await this.fetchBadges();
     
     const claimable = this.badges.filter(badge => badge.earned && !badge.claimed);
     
     if (claimable.length === 0) {
-      log(`📭 No claimable badges`, 'info');
+      log('No claimable badges', 'info');
       return 0;
     }
     
     let claimed = 0;
     
     for (const badge of claimable) {
-      log(`  🏅 ${badge.name} (${badge.tier})`, 'info');
+      log('  ' + badge.name + ' (' + badge.tier + ')', 'info');
       
       try {
         const signatureData = await this.apiClient.requestWithRetry('/api/badges/sbt', {
@@ -1137,29 +1147,30 @@ class SaviorOfHealthBot {
           body: JSON.stringify({ badgeKey: badge.key })
         });
         
-        if (signatureData?.signature) {
-          const badgeClaimer = new BadgeClaimer(this.wallet.privateKey, this.proxyManager);
-          await badgeClaimer.init();
-          const txHash = await badgeClaimer.claimBadge(badge.key, signatureData.signature);
-          if (txHash) {
-            await this.apiClient.requestWithRetry('/api/badges/sbt/confirm', {
-              method: 'POST',
-              body: JSON.stringify({ badgeKey: badge.key, txHash })
-            });
-            claimed++;
-            this.dailyStats.badgesClaimed++;
-            log(`    ✅ ${badge.name} claimed!`, 'success');
+        if (signatureData && signatureData.signature) {
+          const badgeClaimer = new BadgeClaimer(this.privateKey, this.proxyManager);
+          if (await badgeClaimer.init()) {
+            const txHash = await badgeClaimer.claimBadge(badge.key, signatureData.signature);
+            if (txHash) {
+              await this.apiClient.requestWithRetry('/api/badges/sbt/confirm', {
+                method: 'POST',
+                body: JSON.stringify({ badgeKey: badge.key, txHash })
+              });
+              claimed++;
+              this.dailyStats.badgesClaimed++;
+              log('    ' + badge.name + ' claimed!', 'success');
+            }
           }
           await sleep(randomDelay(1000, 2000));
         }
       } catch (error) {
         if (error.message === 'AUTH_EXPIRED') throw error;
-        log(`  ❌ Failed to get signature for ${badge.name}: ${error.message}`, 'error');
+        log('  Failed to get signature for ' + badge.name + ': ' + error.message, 'error');
       }
     }
     
     if (claimed > 0) {
-      log(`✅ Claimed ${claimed} badges`, 'success');
+      log('Claimed ' + claimed + ' badges', 'success');
     }
     
     return claimed;
@@ -1173,26 +1184,26 @@ class SaviorOfHealthBot {
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') {
-        log(`⚠️ Goals API unavailable (server/gateway error)`, 'warning');
+        log('Goals API unavailable (server/gateway error)', 'warning');
         return null;
       }
-      log(`Failed to fetch goals: ${error.message}`, 'error');
+      log('Failed to fetch goals: ' + error.message, 'error');
       return null;
     }
   }
 
   async processWellness() {
     if (!CONFIG.processWellness) {
-      log(`⏭️ Wellness processing disabled`, 'warning');
+      log('Wellness processing disabled', 'warning');
       return 0;
     }
 
-    logBanner('💪 Processing Wellness Goals');
+    logBanner('Processing Wellness Goals');
     
     await this.fetchGoals();
     
     if (!this.goals || !this.goals.today || !this.goals.today.goals) {
-      log(`📭 No wellness goals for today`, 'info');
+      log('No wellness goals for today', 'info');
       return 0;
     }
     
@@ -1201,7 +1212,7 @@ class SaviorOfHealthBot {
     
     for (const goal of this.goals.today.goals) {
       if (serverErrorCount >= 5) {
-        log(`⛔ Too many server errors, stopping wellness goals`, 'error');
+        log('Too many server errors, stopping wellness goals', 'error');
         break;
       }
       
@@ -1230,12 +1241,12 @@ class SaviorOfHealthBot {
               await this.triageChat();
               break;
             default:
-              log(`  ⚠️ Unknown goal type: ${goal.key}`, 'warning');
+              log('  Unknown goal type: ' + goal.key, 'warning');
           }
         } catch (error) {
           if (error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') {
             serverErrorCount++;
-            log(`⚠️ Server/gateway error on wellness (${serverErrorCount}/5)`, 'warning');
+            log('Server/gateway error on wellness (' + serverErrorCount + '/5)', 'warning');
           }
         }
         await sleep(randomDelay(500, 1500));
@@ -1250,13 +1261,13 @@ class SaviorOfHealthBot {
           goal._completed = true;
           completed++;
           this.dailyStats.wellnessGoalsCompleted++;
-          log(`  ✅ ${goal.label} - completed!`, 'success');
+          log('  ' + goal.label + ' - completed!', 'success');
         }
       }
     }
     
     if (completed > 0) {
-      log(`✅ Completed ${completed} wellness goals`, 'success');
+      log('Completed ' + completed + ' wellness goals', 'success');
     }
     
     return completed;
@@ -1270,16 +1281,16 @@ class SaviorOfHealthBot {
         body: JSON.stringify({ amountMl: amount })
       });
       this.dailyStats.waterMl += amount;
-      log(`  💧 Logged ${amount}ml water`, 'success');
+      log('  Logged ' + amount + 'ml water', 'success');
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
-        log(`  ⚠️ Already logged water today`, 'warning');
+        log('  Already logged water today', 'warning');
         return null;
       }
       if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
-        log(`  ❌ Failed to log water: ${error.message}`, 'error');
+        log('  Failed to log water: ' + error.message, 'error');
       }
       return null;
     }
@@ -1298,12 +1309,12 @@ class SaviorOfHealthBot {
         })
       });
       this.dailyStats.exerciseMinutes += min;
-      log(`  🏃 Logged ${min}min exercise`, 'success');
+      log('  Logged ' + min + 'min exercise', 'success');
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
-        log(`  ⚠️ Already logged exercise today`, 'warning');
+        log('  Already logged exercise today', 'warning');
         return null;
       }
       return null;
@@ -1317,7 +1328,7 @@ class SaviorOfHealthBot {
       const bedtime = new Date(now);
       bedtime.setHours(23, 0, 0, 0);
       const wakeTime = new Date(bedtime);
-      wakeTime.setHours(bedtime.getHours() + h, 0, 0, 0);
+      wakeTime.setHours(bedtime.getHours() + Math.floor(h), bedtime.getMinutes() + Math.round((h % 1) * 60), 0, 0);
       
       const data = await this.apiClient.requestWithRetry('/api/logs/sleep', {
         method: 'POST',
@@ -1327,12 +1338,12 @@ class SaviorOfHealthBot {
         })
       });
       this.dailyStats.sleepHours += h;
-      log(`  😴 Logged ${h.toFixed(1)}h sleep`, 'success');
+      log('  Logged ' + h.toFixed(1) + 'h sleep', 'success');
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
-        log(`  ⚠️ Already logged sleep today`, 'warning');
+        log('  Already logged sleep today', 'warning');
         return null;
       }
       return null;
@@ -1358,12 +1369,12 @@ class SaviorOfHealthBot {
         })
       });
       this.dailyStats.mealsLogged++;
-      log(`  🍽️ Logged ${meal}: ${food} (${calories} cal)`, 'success');
+      log('  Logged ' + meal + ': ' + food + ' (' + calories + ' cal)', 'success');
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
-        log(`  ⚠️ Already logged a meal today`, 'warning');
+        log('  Already logged a meal today', 'warning');
         return null;
       }
       return null;
@@ -1383,12 +1394,12 @@ class SaviorOfHealthBot {
         })
       });
       this.dailyStats.meditationMinutes += min;
-      log(`  🧘 Logged ${min}min meditation`, 'success');
+      log('  Logged ' + min + 'min meditation', 'success');
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
-        log(`  ⚠️ Already logged meditation today`, 'warning');
+        log('  Already logged meditation today', 'warning');
         return null;
       }
       return null;
@@ -1403,12 +1414,12 @@ class SaviorOfHealthBot {
         body: JSON.stringify({ score: s })
       });
       this.dailyStats.moodLogged = true;
-      log(`  😊 Logged mood: ${s}/5`, 'success');
+      log('  Logged mood: ' + s + '/5', 'success');
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
-        log(`  ⚠️ Already logged mood today`, 'warning');
+        log('  Already logged mood today', 'warning');
         return null;
       }
       return null;
@@ -1417,7 +1428,7 @@ class SaviorOfHealthBot {
 
   async triageChat() {
     if (!CONFIG.processTriage) {
-      log(`⏭️ Triage processing disabled`, 'warning');
+      log('Triage processing disabled', 'warning');
       return null;
     }
     
@@ -1443,26 +1454,144 @@ class SaviorOfHealthBot {
       
       this.dailyStats.triageChats++;
       
-      if (data?.reward && data.reward.awarded) {
+      if (data && data.reward && data.reward.awarded) {
         this.balance = data.balance || this.balance;
         this.totalEarned += data.reward.amount || 0;
-        log(`  💬 +${data.reward.amount} HP for triage chat`, 'success');
+        log('  +' + data.reward.amount + ' HP for triage chat', 'success');
       } else {
-        log(`  💬 Triage chat completed`, 'success');
+        log('  Triage chat completed', 'success');
       }
       
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
-        log(`  ⚠️ Already completed triage today`, 'warning');
+        log('  Already completed triage today', 'warning');
         return null;
       }
       if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
-        log(`  ❌ Failed to triage chat: ${error.message}`, 'error');
+        log('  Failed to triage chat: ' + error.message, 'error');
       }
       return null;
     }
+  }
+
+  // ==================== AI AGENTS (NEW) ====================
+
+  getAgentConfigs() {
+    return {
+      nurse: {
+        id: 'nurse',
+        name: 'Nia',
+        icon: '💪',
+        questions: [
+          'How is your energy this morning?',
+          'Did you sleep well last night?',
+          'How stressed are you today on a scale of 1-10?',
+          'What is your mood like today?',
+          'Have you been active today?'
+        ],
+        followUps: ['I didnt sleep well', 'Help me build a healthy routine', 'Check my BMI']
+      },
+      gatekeeper: {
+        id: 'gatekeeper',
+        name: 'Atlas',
+        icon: '💬',
+        questions: [
+          'I have a headache and fever',
+          'My chest feels tight',
+          'Which department should I visit?',
+          'I have a sore throat for 3 days',
+          'I feel dizzy and nauseous'
+        ]
+      },
+      nutritionist: {
+        id: 'nutritionist',
+        name: 'Sage',
+        icon: '🍎',
+        questions: [
+          'Plan a balanced lunch for me',
+          'Is my diet healthy?',
+          'I had chicken salad and rice',
+          'What should I eat for dinner?',
+          'Give me a healthy meal plan'
+        ]
+      },
+      mindcare: {
+        id: 'mindcare',
+        name: 'Luna',
+        icon: '🧘',
+        questions: [
+          'I\'m feeling stressed today',
+          'Help me relax',
+          'I can\'t focus',
+          'I feel anxious',
+          'Give me a mindfulness exercise'
+        ]
+      }
+    };
+  }
+
+  async chatWithAgent(agentType, message) {
+    try {
+      const data = await this.apiClient.requestWithRetry('/api/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+          message: message,
+          agentType: agentType
+        })
+      });
+      
+      if (data && data.reward && data.reward.awarded) {
+        this.balance = data.balance || this.balance;
+        this.totalEarned += data.reward.amount || 0;
+        this.dailyStats.agentRewards += data.reward.amount || 0;
+        log('  +' + data.reward.amount + ' HP from ' + agentType + ' chat', 'success');
+      }
+      
+      this.dailyStats.agentChats++;
+      return data;
+    } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
+        log('  Chat with ' + agentType + ' failed: ' + error.message, 'warning');
+      }
+      return null;
+    }
+  }
+
+  async processAgents() {
+    if (!CONFIG.processAgents) {
+      log('AI Agent processing disabled', 'warning');
+      return 0;
+    }
+
+    logBanner('Processing AI Agents');
+    
+    const agents = this.getAgentConfigs();
+    let totalReward = 0;
+    let successCount = 0;
+    
+    for (const [type, config] of Object.entries(agents)) {
+      const question = config.questions[Math.floor(Math.random() * config.questions.length)];
+      log('  ' + config.icon + ' Talking to ' + config.name + ' (' + type + ')...', 'agent');
+      
+      const result = await this.chatWithAgent(type, question);
+      if (result && result.reward && result.reward.awarded) {
+        totalReward += result.reward.amount || 0;
+        successCount++;
+      }
+      
+      await sleep(randomDelay(1500, 3000));
+    }
+    
+    if (successCount > 0) {
+      log('Completed ' + successCount + ' AI agent chats (' + totalReward + ' HP)', 'success');
+    } else {
+      log('No AI agent chats completed', 'info');
+    }
+    
+    return totalReward;
   }
 
   async fetchStakeGoals() {
@@ -1472,7 +1601,7 @@ class SaviorOfHealthBot {
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
-      log(`Failed to fetch stake goals: ${error.message}`, 'error');
+      log('Failed to fetch stake goals: ' + error.message, 'error');
       return null;
     }
   }
@@ -1488,15 +1617,15 @@ class SaviorOfHealthBot {
         })
       });
       this.dailyStats.stakesPlaced++;
-      if (data?.balance) this.balance = data.balance;
-      log(`  🎯 Staked ${amount} HP on ${label || goalKey}`, 'success');
+      if (data && data.balance) this.balance = data.balance;
+      log('  Staked ' + amount + ' HP on ' + (label || goalKey), 'success');
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
-        log(`  ⚠️ Already staked on ${goalKey} today`, 'warning');
+        log('  Already staked on ' + goalKey + ' today', 'warning');
       } else if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
-        log(`  ❌ Failed to stake on ${goalKey}: ${error.message}`, 'error');
+        log('  Failed to stake on ' + goalKey + ': ' + error.message, 'error');
       }
       return null;
     }
@@ -1504,16 +1633,16 @@ class SaviorOfHealthBot {
 
   async processStaking() {
     if (!CONFIG.stakeGoals) {
-      log(`⏭️ Staking disabled`, 'warning');
+      log('Staking disabled', 'warning');
       return 0;
     }
 
-    logBanner('🎯 Processing Staking');
+    logBanner('Processing Staking');
     
     await this.fetchStakeGoals();
     
     if (!this.stakeGoals) {
-      log(`❌ Failed to fetch stake goals`, 'error');
+      log('Failed to fetch stake goals', 'error');
       return 0;
     }
     
@@ -1524,7 +1653,7 @@ class SaviorOfHealthBot {
         this.dailyStats.stakesWon++;
         this.balance = this.stakeGoals.balance || this.balance;
         this.totalEarned += stake.payout || 0;
-        log(`  🎯 Won stake! +${stake.payout} HP for ${stake.label}`, 'success');
+        log('  Won stake! +' + stake.payout + ' HP for ' + stake.label, 'success');
       }
     }
     
@@ -1539,7 +1668,7 @@ class SaviorOfHealthBot {
           staked++;
           await sleep(randomDelay(500, 1000));
         } else {
-          log(`  ⚠️ Insufficient HP to stake on ${goal.key}`, 'warning');
+          log('  Insufficient HP to stake on ' + goal.key, 'warning');
           break;
         }
       }
@@ -1550,12 +1679,12 @@ class SaviorOfHealthBot {
 
   async processAccount(account) {
     const shortAddr = this.address ? 
-      `${this.address.substring(0, 8)}...${this.address.substring(this.address.length - 6)}` : 
+      this.address.substring(0, 8) + '...' + this.address.substring(this.address.length - 6) : 
       'unknown';
     
-    logBanner(`👤 Account ${shortAddr}`);
+    logBanner('Account ' + shortAddr);
     if (this.useProxy && this.proxyManager) {
-      log(`🔌 Using proxies (${this.proxyManager.getProxyCount()} available)`, 'proxy');
+      log('Using proxies (' + this.proxyManager.getProxyCount() + ' available)', 'proxy');
     }
     
     this.dailyStats.accountsProcessed++;
@@ -1568,59 +1697,68 @@ class SaviorOfHealthBot {
         break;
       }
       if (attempt < 3) {
-        log(`🔄 Login attempt ${attempt} failed, retrying...`, 'warning');
+        log('Login attempt ' + attempt + ' failed, retrying...', 'warning');
         await sleep(2000);
       }
     }
     
     if (!loginSuccess) {
-      log(`❌ Failed to login after 3 attempts`, 'error');
+      log('Failed to login after 3 attempts', 'error');
       return null;
     }
     
-    const cardsAnswered = await this.processDeck().catch(e => {
+    const cardsAnswered = await this.processDeck().catch((e) => {
       if (e.message === 'AUTH_EXPIRED') {
-        log(`🔄 Token expired during deck, re-logging...`, 'warning');
+        log('Token expired during deck, re-logging...', 'warning');
         return this.login(account.privateKey, true).then(() => this.processDeck()).catch(() => 0);
       }
-      log(`⚠️ Deck processing failed: ${e.message}`, 'warning');
+      log('Deck processing failed: ' + e.message, 'warning');
       return 0;
     });
     
-    const campaignsCompleted = await this.processCampaigns().catch(e => {
+    const campaignsCompleted = await this.processCampaigns().catch((e) => {
       if (e.message === 'AUTH_EXPIRED') {
-        log(`🔄 Token expired during campaigns, re-logging...`, 'warning');
+        log('Token expired during campaigns, re-logging...', 'warning');
         return this.login(account.privateKey, true).then(() => this.processCampaigns()).catch(() => 0);
       }
-      log(`⚠️ Campaigns failed: ${e.message}`, 'warning');
+      log('Campaigns failed: ' + e.message, 'warning');
       return 0;
     });
     
-    const badgesClaimed = await this.processBadges().catch(e => {
+    const badgesClaimed = await this.processBadges().catch((e) => {
       if (e.message === 'AUTH_EXPIRED') {
-        log(`🔄 Token expired during badges, re-logging...`, 'warning');
+        log('Token expired during badges, re-logging...', 'warning');
         return this.login(account.privateKey, true).then(() => this.processBadges()).catch(() => 0);
       }
-      log(`⚠️ Badges failed: ${e.message}`, 'warning');
+      log('Badges failed: ' + e.message, 'warning');
       return 0;
     });
     
-    await this.processWellness().catch(e => {
+    await this.processWellness().catch((e) => {
       if (e.message === 'AUTH_EXPIRED') {
-        log(`🔄 Token expired during wellness, re-logging...', 'warning');
+        log('Token expired during wellness, re-logging...', 'warning');
         return this.login(account.privateKey, true).then(() => this.processWellness()).catch(() => {});
       }
       if (!e.message.includes('SERVER_ERROR') && !e.message.includes('GATEWAY_ERROR')) {
-        log(`⚠️ Wellness failed: ${e.message}`, 'warning');
+        log('Wellness failed: ' + e.message, 'warning');
       }
     });
     
-    await this.processStaking().catch(e => {
+    await this.processAgents().catch((e) => {
       if (e.message === 'AUTH_EXPIRED') {
-        log(`🔄 Token expired during staking, re-logging...', 'warning');
+        log('Token expired during agents, re-logging...', 'warning');
+        return this.login(account.privateKey, true).then(() => this.processAgents()).catch(() => 0);
+      }
+      log('Agents failed: ' + e.message, 'warning');
+      return 0;
+    });
+    
+    await this.processStaking().catch((e) => {
+      if (e.message === 'AUTH_EXPIRED') {
+        log('Token expired during staking, re-logging...', 'warning');
         return this.login(account.privateKey, true).then(() => this.processStaking()).catch(() => {});
       }
-      log(`⚠️ Staking failed: ${e.message}`, 'warning');
+      log('Staking failed: ' + e.message, 'warning');
     });
     
     await this.logWater(250).catch(() => {});
@@ -1654,20 +1792,23 @@ class SaviorOfHealthBot {
       stakesPlaced: this.dailyStats.stakesPlaced,
       stakesWon: this.dailyStats.stakesWon,
       stakesLost: this.dailyStats.stakesLost,
+      agentChats: this.dailyStats.agentChats,
+      agentRewards: this.dailyStats.agentRewards,
     };
     
-    logBanner(`✅ Account Complete!`);
-    log(`💰 Balance: ${formatNumber(this.balance)} HP`, 'coin');
-    log(`💫 Earned: ${formatNumber(this.totalEarned)} HP`, 'success');
-    log(`📚 Cards: ${this.dailyStats.totalCardsAnswered}`, 'info');
-    log(`🏥 Campaigns: ${this.dailyStats.totalCampaignsCompleted}`, 'info');
-    log(`🏅 Badges: ${this.dailyStats.badgesClaimed}`, 'badge');
-    log(`💪 Wellness: ${this.dailyStats.wellnessGoalsCompleted}`, 'wellness');
-    log(`💧 Water: ${this.dailyStats.waterMl}ml`, 'water');
-    log(`😊 Mood: ${this.dailyStats.moodLogged ? '✅' : '❌'}`, 'mood');
-    log(`🎯 Stakes: ${this.dailyStats.stakesWon} won, ${this.dailyStats.stakesLost} lost`, 'stake');
+    logBanner('Account Complete!');
+    log('Balance: ' + formatNumber(this.balance) + ' HP', 'coin');
+    log('Earned: ' + formatNumber(this.totalEarned) + ' HP', 'success');
+    log('Cards: ' + this.dailyStats.totalCardsAnswered, 'info');
+    log('Campaigns: ' + this.dailyStats.totalCampaignsCompleted, 'info');
+    log('Badges: ' + this.dailyStats.badgesClaimed, 'badge');
+    log('Wellness: ' + this.dailyStats.wellnessGoalsCompleted, 'wellness');
+    log('Water: ' + this.dailyStats.waterMl + 'ml', 'water');
+    log('Mood: ' + (this.dailyStats.moodLogged ? 'Yes' : 'No'), 'mood');
+    log('Stakes: ' + this.dailyStats.stakesWon + ' won, ' + this.dailyStats.stakesLost + ' lost', 'stake');
+    log('AI Agent Chats: ' + this.dailyStats.agentChats + ' (' + this.dailyStats.agentRewards + ' HP)', 'agent');
     if (this.dailyStats.aiAnswers > 0) {
-      log(`🧠 AI: ${this.dailyStats.aiAnswers} answers`, 'info');
+      log('AI: ' + this.dailyStats.aiAnswers + ' answers', 'info');
     }
     
     this.dailyStats.totalHP += this.balance;
@@ -1695,16 +1836,18 @@ class SaviorOfHealthBot {
       stakesLost: 0,
       aiAnswers: 0,
       aiAttempts: 0,
+      agentChats: 0,
+      agentRewards: 0,
     };
     
     while (true) {
       const accounts = parseAccounts();
       if (accounts.length === 0) {
-        log('❌ No accounts found in accounts.txt', 'error');
+        log('No accounts found in accounts.txt', 'error');
         return;
       }
       
-      log(`📋 Found ${accounts.length} accounts`, 'info');
+      log('Found ' + accounts.length + ' accounts', 'info');
       
       const allResults = [];
       let successful = 0;
@@ -1727,10 +1870,12 @@ class SaviorOfHealthBot {
         stakesLost: 0,
         aiAnswers: 0,
         aiAttempts: 0,
+        agentChats: 0,
+        agentRewards: 0,
       };
       
       for (let i = 0; i < accounts.length; i++) {
-        log(`\n📌 Processing ${i + 1}/${accounts.length}`, 'highlight');
+        log('Processing ' + (i + 1) + '/' + accounts.length, 'highlight');
         
         const bot = new SaviorOfHealthBot(this.useProxy);
         const result = await bot.processAccount(accounts[i]);
@@ -1756,6 +1901,8 @@ class SaviorOfHealthBot {
           runStats.stakesLost += result.stakesLost || 0;
           runStats.aiAnswers += result.aiAnswers || 0;
           runStats.aiAttempts += result.aiAttempts || 0;
+          runStats.agentChats += result.agentChats || 0;
+          runStats.agentRewards += result.agentRewards || 0;
           
           grandTotal.accountsProcessed++;
           grandTotal.totalHP += result.balance || 0;
@@ -1775,6 +1922,8 @@ class SaviorOfHealthBot {
           grandTotal.stakesLost += result.stakesLost || 0;
           grandTotal.aiAnswers += result.aiAnswers || 0;
           grandTotal.aiAttempts += result.aiAttempts || 0;
+          grandTotal.agentChats += result.agentChats || 0;
+          grandTotal.agentRewards += result.agentRewards || 0;
           
           saveResults({
             timestamp: new Date().toISOString(),
@@ -1788,38 +1937,39 @@ class SaviorOfHealthBot {
         
         if (i < accounts.length - 1) {
           const waitTime = randomDelay(CONFIG.delayBetweenAccounts, CONFIG.delayBetweenAccounts + 3000);
-          log(`💤 Waiting ${Math.round(waitTime/1000)}s before next account...`, 'sleep');
+          log('Waiting ' + Math.round(waitTime/1000) + 's before next account...', 'sleep');
           await sleep(waitTime);
         }
       }
       
-      logBanner('📊 FINAL SUMMARY');
-      log(`✅ Successful: ${successful}/${accounts.length}`, 'success');
-      log(`💰 Total HP: ${formatNumber(runStats.totalHP)}`, 'coin');
-      log(`📚 Cards answered: ${runStats.totalCardsAnswered}`, 'info');
-      log(`🏥 Campaigns completed: ${runStats.totalCampaignsCompleted}`, 'info');
-      log(`🏅 Badges claimed: ${runStats.badgesClaimed}`, 'badge');
-      log(`💪 Wellness goals: ${runStats.wellnessGoalsCompleted}`, 'wellness');
-      log(`🍎 Meals logged: ${runStats.mealsLogged}`, 'nutrition');
-      log(`🏃 Exercise minutes: ${runStats.exerciseMinutes}`, 'wellness');
-      log(`😴 Sleep hours: ${runStats.sleepHours.toFixed(1)}`, 'wellness');
-      log(`🧘 Meditation minutes: ${runStats.meditationMinutes}`, 'mind');
-      log(`💬 Triage chats: ${runStats.triageChats}`, 'triage');
-      log(`💧 Water: ${runStats.waterMl}ml`, 'water');
-      log(`😊 Mood logged: ${runStats.moodLogged} times`, 'mood');
-      log(`🎯 Stakes: ${runStats.stakesPlaced} placed, ${runStats.stakesWon} won, ${runStats.stakesLost} lost`, 'stake');
+      logBanner('FINAL SUMMARY');
+      log('Successful: ' + successful + '/' + accounts.length, 'success');
+      log('Total HP: ' + formatNumber(runStats.totalHP), 'coin');
+      log('Cards answered: ' + runStats.totalCardsAnswered, 'info');
+      log('Campaigns completed: ' + runStats.totalCampaignsCompleted, 'info');
+      log('Badges claimed: ' + runStats.badgesClaimed, 'badge');
+      log('Wellness goals: ' + runStats.wellnessGoalsCompleted, 'wellness');
+      log('Meals logged: ' + runStats.mealsLogged, 'nutrition');
+      log('Exercise minutes: ' + runStats.exerciseMinutes, 'wellness');
+      log('Sleep hours: ' + runStats.sleepHours.toFixed(1), 'wellness');
+      log('Meditation minutes: ' + runStats.meditationMinutes, 'mind');
+      log('Triage chats: ' + runStats.triageChats, 'triage');
+      log('Water: ' + runStats.waterMl + 'ml', 'water');
+      log('Mood logged: ' + runStats.moodLogged + ' times', 'mood');
+      log('Stakes: ' + runStats.stakesPlaced + ' placed, ' + runStats.stakesWon + ' won, ' + runStats.stakesLost + ' lost', 'stake');
+      log('AI Agent Chats: ' + runStats.agentChats + ' (' + runStats.agentRewards + ' HP)', 'agent');
       if (runStats.aiAnswers > 0) {
-        log(`🧠 AI answers: ${runStats.aiAnswers} (${runStats.aiAttempts} attempts)`, 'info');
+        log('AI answers: ' + runStats.aiAnswers + ' (' + runStats.aiAttempts + ' attempts)', 'info');
       }
-      log(`🔌 Proxy: ${this.useProxy ? 'Enabled' : 'Disabled'}`, 'proxy');
+      log('Proxy: ' + (this.useProxy ? 'Enabled' : 'Disabled'), 'proxy');
       
       if (allResults.length > 0) {
-        log('\n📋 Account Results:', 'info');
+        log('Account Results:', 'info');
         for (const result of allResults) {
           const shortAddr = result.address ? 
-            `${result.address.substring(0, 8)}...${result.address.substring(result.address.length - 6)}` : 
+            result.address.substring(0, 8) + '...' + result.address.substring(result.address.length - 6) : 
             'unknown';
-          log(`  ${shortAddr}: ${formatNumber(result.balance)} HP (Cards: ${result.cardsAnswered || 0}, Campaigns: ${result.campaignsCompleted || 0})`, 'info');
+          log('  ' + shortAddr + ': ' + formatNumber(result.balance) + ' HP (Cards: ' + (result.cardsAnswered || 0) + ', Campaigns: ' + (result.campaignsCompleted || 0) + ', Agent Chats: ' + (result.agentChats || 0) + ')', 'info');
         }
       }
       
@@ -1828,9 +1978,9 @@ class SaviorOfHealthBot {
         const hours = Math.floor(timeUntil / (1000 * 60 * 60));
         const minutes = Math.floor((timeUntil % (1000 * 60 * 60)) / (1000 * 60));
         
-        logBanner(`💤 Sleeping until next day`);
-        log(`⏰ ${hours}h ${minutes}m until daily reset`, 'sleep');
-        log(`📅 Next run at: ${new Date(Date.now() + timeUntil).toLocaleString()}`, 'sleep');
+        logBanner('Sleeping until next day');
+        log('' + hours + 'h ' + minutes + 'm until daily reset', 'sleep');
+        log('Next run at: ' + new Date(Date.now() + timeUntil).toLocaleString(), 'sleep');
         
         const intervalMs = CONFIG.checkIntervalMinutes * 60 * 1000;
         let remaining = timeUntil;
@@ -1843,11 +1993,11 @@ class SaviorOfHealthBot {
           if (remaining > 0) {
             const remainingHours = Math.floor(remaining / (1000 * 60 * 60));
             const remainingMin = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
-            log(`⏳ ${remainingHours}h ${remainingMin}m remaining...`, 'sleep');
+            log('' + remainingHours + 'h ' + remainingMin + 'm remaining...', 'sleep');
           }
         }
         
-        log(`🌅 New day started!`, 'success');
+        log('New day started!', 'success');
         await sleep(randomDelay(1000, 5000));
       }
     }
@@ -1855,13 +2005,13 @@ class SaviorOfHealthBot {
 }
 
 function showMenu() {
-  console.log(`\n${COLORS.brightCyan}${'═'.repeat(60)}${COLORS.reset}`);
-  console.log(`${COLORS.brightYellow}  SAVIOROFHEALTH BOT MENU  ${COLORS.reset}`);
-  console.log(`${COLORS.brightCyan}${'═'.repeat(60)}${COLORS.reset}`);
-  console.log(`${COLORS.brightGreen}  1.${COLORS.reset} Run without proxy (Direct connection)`);
-  console.log(`${COLORS.brightYellow}  2.${COLORS.reset} Run with proxy (Load from proxy.txt)`);
-  console.log(`${COLORS.brightRed}  3.${COLORS.reset} Exit`);
-  console.log(`${COLORS.brightCyan}${'═'.repeat(60)}${COLORS.reset}`);
+  console.log('\n' + COLORS.brightCyan + '='.repeat(60) + COLORS.reset);
+  console.log(COLORS.brightYellow + '  SAVIOROFHEALTH BOT MENU  ' + COLORS.reset);
+  console.log(COLORS.brightCyan + '='.repeat(60) + COLORS.reset);
+  console.log(COLORS.brightGreen + '  1.' + COLORS.reset + ' Run without proxy (Direct connection)');
+  console.log(COLORS.brightYellow + '  2.' + COLORS.reset + ' Run with proxy (Load from proxy.txt)');
+  console.log(COLORS.brightRed + '  3.' + COLORS.reset + ' Exit');
+  console.log(COLORS.brightCyan + '='.repeat(60) + COLORS.reset);
 }
 
 function askQuestion(query) {
@@ -1878,30 +2028,30 @@ function askQuestion(query) {
 async function main() {
   while (true) {
     showMenu();
-    const choice = await askQuestion(`${COLORS.brightCyan}Enter your choice (1-3): ${COLORS.reset}`);
+    const choice = await askQuestion(COLORS.brightCyan + 'Enter your choice (1-3): ' + COLORS.reset);
     
     if (choice === '1') {
-      logBanner('🚀 Starting bot without proxy...');
+      logBanner('Starting bot without proxy...');
       const bot = new SaviorOfHealthBot(false);
       await bot.run();
       break;
     } else if (choice === '2') {
-      logBanner('🚀 Starting bot with proxy...');
+      logBanner('Starting bot with proxy...');
       const bot = new SaviorOfHealthBot(true);
       await bot.run();
       break;
     } else if (choice === '3') {
-      log('👋 Exiting...', 'info');
+      log('Exiting...', 'info');
       process.exit(0);
     } else {
-      log('❌ Invalid choice. Please enter 1, 2, or 3.', 'error');
+      log('Invalid choice. Please enter 1, 2, or 3.', 'error');
     }
   }
 }
 
 if (require.main === module) {
   main().catch(error => {
-    log(`❌ Fatal error: ${error.message}`, 'error');
+    log('Fatal error: ' + error.message, 'error');
     process.exit(1);
   });
 }

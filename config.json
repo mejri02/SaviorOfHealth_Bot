@@ -1,5 +1,5 @@
 {
-  "claimBadges": false,
+  "claimBadges": true,
   "minBnbBalance": 0.0005,
   "processDeck": true,
   "processCampaigns": true,
@@ -7,6 +7,7 @@
   "processNutrition": true,
   "processMindspace": true,
   "processTriage": true,
+  "processAgents": true,
   "stakeGoals": true,
   "stakeAmount": 10,
   "autoStake": true,
