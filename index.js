@@ -7,8 +7,6 @@ const readline = require('readline');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
-// ==================== CONFIG ====================
-
 const BASE_DIR = __dirname;
 const CONFIG_FILE = path.join(BASE_DIR, 'config.json');
 const ACCOUNTS_FILE = path.join(BASE_DIR, 'accounts.txt');
@@ -30,9 +28,9 @@ function loadConfig() {
     stakeAmount: 10,
     autoStake: true,
     useGroqAI: true,
-    maxCardsPerDay: 50,
-    delayBetweenAccounts: 3000,
-    delayBetweenRequests: 500,
+    maxCardsPerDay: 10,
+    delayBetweenAccounts: 5000,
+    delayBetweenRequests: 2000,
     groqTimeout: 10000,
     groqModels: ['llama-3.1-8b-instant', 'gemma2-9b-it', 'mixtral-8x7b-32768'],
     bscRpc: 'https://bsc-dataseed.binance.org/',
@@ -41,6 +39,10 @@ function loadConfig() {
     apiUrl: 'https://saviorofhealth.app',
     sleepUntilNextDay: true,
     checkIntervalMinutes: 5,
+    maxRetries: 5,
+    retryDelay: 3000,
+    skipOnServerError: true,
+    requestTimeout: 60000,
   };
 
   if (!fs.existsSync(CONFIG_FILE)) {
@@ -59,8 +61,6 @@ function loadConfig() {
 }
 
 const CONFIG = loadConfig();
-
-// ==================== COLORS ====================
 
 const COLORS = {
   reset: '\x1b[0m',
@@ -105,6 +105,7 @@ function log(message, type = 'info', data = null) {
     triage: { color: COLORS.brightCyan, icon: '💬' },
     water: { color: COLORS.brightBlue, icon: '💧' },
     mood: { color: COLORS.brightMagenta, icon: '😊' },
+    skip: { color: COLORS.brightYellow, icon: '⏭️' },
   };
   const style = styles[type] || styles.info;
   const prefix = `${style.color}${style.icon}${COLORS.reset}`;
@@ -180,15 +181,13 @@ function generateSIWEMessage(address, chainId) {
     'saviorofhealth wants you to sign in with your wallet.',
     '',
     `Address: ${address}`,
-    `Chain ID: ${chainId}`,
+    `Chain ID: ${chainId || 56}`,
     `Nonce: ${nonce}`,
     `Issued At: ${Date.now()}`,
     '',
     'This is a free, gas-less signature. It only proves you own this wallet. No transaction is sent.'
   ].join('\n');
 }
-
-// ==================== TIME HELPERS ====================
 
 function getNextDayStart() {
   const now = new Date();
@@ -201,8 +200,6 @@ function getNextDayStart() {
 function getTimeUntilNextDay() {
   return getNextDayStart() - Date.now();
 }
-
-// ==================== PROXY MANAGER ====================
 
 class ProxyManager {
   constructor() {
@@ -295,8 +292,6 @@ class ProxyManager {
   }
 }
 
-// ==================== GROQ MANAGER ====================
-
 class GroqManager {
   constructor() {
     this.apiKeys = [];
@@ -356,7 +351,6 @@ class GroqManager {
 
   rotateKey() {
     if (this.apiKeys.length === 0) return null;
-    const oldKey = this.apiKeys[this.currentKeyIndex]?.substring(0, 10) || 'none';
     this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
     log(`🔄 Rotated API key`, 'rotate');
     return this.apiKeys[this.currentKeyIndex];
@@ -498,24 +492,38 @@ ${options ? 'Respond with ONLY the option text you choose, nothing else.' : 'Giv
   }
 }
 
-// ==================== API CLIENT ====================
-
 class ApiClient {
   constructor(proxyManager = null) {
     this.proxyManager = proxyManager;
     this.token = null;
+    this.tokenExpiry = null;
     this.userAgent = getRandomUserAgent();
+    this.requestCount = 0;
+    this.lastRequestTime = 0;
+    this.maxRequestsPerSecond = 5;
   }
 
   setToken(token) {
     this.token = token;
+    this.tokenExpiry = Date.now() + 3600000;
   }
 
   refreshUserAgent() {
     this.userAgent = getRandomUserAgent();
   }
 
+  isTokenExpired() {
+    return this.tokenExpiry && Date.now() > this.tokenExpiry;
+  }
+
   async request(endpoint, options = {}) {
+    this.requestCount++;
+    const now = Date.now();
+    if (this.requestCount > this.maxRequestsPerSecond && now - this.lastRequestTime < 1000) {
+      await sleep(randomDelay(500, 1500));
+    }
+    this.lastRequestTime = now;
+
     const url = `${CONFIG.apiUrl}${endpoint}`;
     const headers = {
       'Content-Type': 'application/json',
@@ -528,7 +536,11 @@ class ApiClient {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
-    const fetchOptions = { ...options, headers };
+    const fetchOptions = { 
+      ...options, 
+      headers,
+      timeout: CONFIG.requestTimeout || 60000,
+    };
 
     if (this.proxyManager) {
       const proxy = this.proxyManager.getRandomProxy();
@@ -538,26 +550,96 @@ class ApiClient {
       }
     }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CONFIG.requestTimeout || 60000);
+    fetchOptions.signal = controller.signal;
+
     try {
       const response = await fetch(url, fetchOptions);
-      const data = await response.json();
-      
+      clearTimeout(timeoutId);
+
+      const contentType = response.headers.get('content-type') || '';
+
+      if (response.status === 401) {
+        throw new Error('AUTH_EXPIRED');
+      }
+
+      if (response.status === 504 || response.status === 502 || response.status === 503) {
+        log(`⚠️ Gateway error (${response.status}) on ${endpoint}`, 'warning');
+        throw new Error(`GATEWAY_ERROR`);
+      }
+
+      if (response.status === 500) {
+        log(`⚠️ Server error (500) on ${endpoint}`, 'warning');
+        throw new Error(`SERVER_ERROR`);
+      }
+
+      const text = await response.text();
+
+      if (!text || text.trim() === '') {
+        throw new Error('Empty response from server');
+      }
+
+      if (!contentType.includes('application/json')) {
+        if (text.includes('<html') || text.includes('<!DOCTYPE')) {
+          throw new Error(`HTML response received (status ${response.status})`);
+        }
+        throw new Error(`Non-JSON response: ${text.substring(0, 100)}`);
+      }
+
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        throw new Error(`Invalid JSON: ${text.substring(0, 100)}`);
+      }
+
       if (!response.ok) {
         throw new Error(data.error?.message || data.message || `HTTP ${response.status}`);
       }
-      
+
       await sleep(randomDelay(200, 600));
       return data;
+
     } catch (error) {
-      if (error.message.includes('fetch')) {
-        throw new Error(`Cannot connect to ${CONFIG.apiUrl}. Check proxy/connection.`);
-      }
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message === 'GATEWAY_ERROR') throw error;
+      if (error.message === 'SERVER_ERROR') throw error;
       throw error;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
-}
 
-// ==================== BADGE CLAIMER ====================
+  async requestWithRetry(endpoint, options = {}, maxRetries = CONFIG.maxRetries || 5) {
+    let lastError;
+    let retryDelay = CONFIG.retryDelay || 3000;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.request(endpoint, options);
+      } catch (error) {
+        lastError = error;
+        
+        if (error.message === 'AUTH_EXPIRED') throw error;
+        if (error.message.includes('400') || error.message.includes('422')) throw error;
+        
+        if ((error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') && CONFIG.skipOnServerError) {
+          log(`⏭️ Server/gateway error, skipping this request`, 'skip');
+          return null;
+        }
+        
+        if (attempt < maxRetries) {
+          const delay = retryDelay * Math.pow(1.5, attempt - 1);
+          log(`🔄 Retry ${attempt}/${maxRetries} for ${endpoint} in ${Math.round(delay/1000)}s...`, 'warning');
+          await sleep(delay);
+        }
+      }
+    }
+    
+    throw lastError;
+  }
+}
 
 class BadgeClaimer {
   constructor(privateKey, proxyManager = null) {
@@ -619,8 +701,6 @@ class BadgeClaimer {
   }
 }
 
-// ==================== MAIN BOT ====================
-
 class SaviorOfHealthBot {
   constructor(useProxy = false) {
     this.proxyManager = useProxy ? new ProxyManager() : null;
@@ -640,6 +720,7 @@ class SaviorOfHealthBot {
     this.useProxy = useProxy;
     this.goals = null;
     this.stakeGoals = null;
+    this.chainId = CONFIG.chainId || 56;
     this.dailyStats = {
       accountsProcessed: 0,
       totalHP: 0,
@@ -662,10 +743,12 @@ class SaviorOfHealthBot {
     };
   }
 
-  // ---------- AUTHENTICATION ----------
-
-  async login(privateKey) {
+  async login(privateKey, forceRefresh = false) {
     try {
+      if (!forceRefresh && this.apiClient.token && !this.apiClient.isTokenExpired()) {
+        return true;
+      }
+
       const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
       this.wallet = new ethers.Wallet(pk);
       this.address = this.wallet.address;
@@ -673,7 +756,15 @@ class SaviorOfHealthBot {
       const shortAddr = `${this.address.substring(0, 8)}...${this.address.substring(this.address.length - 6)}`;
       log(`🔑 ${shortAddr}`, 'info');
       
-      const message = generateSIWEMessage(this.address, 1);
+      let chainId = CONFIG.chainId || 56;
+      if (this.provider) {
+        try {
+          const network = await this.provider.getNetwork();
+          chainId = Number(network.chainId);
+        } catch (e) {}
+      }
+      
+      const message = generateSIWEMessage(this.address, chainId);
       const signature = await this.wallet.signMessage(message);
       
       const response = await this.apiClient.request('/api/auth/wallet/siwe', {
@@ -686,28 +777,32 @@ class SaviorOfHealthBot {
       }
       
       this.apiClient.setToken(response.token);
-      this.balance = response.user?.balance || 0;
+      this.balance = response.user?.tokenBalance || 0;
+      this.chainId = chainId;
       
-      log(`✅ Authenticated`, 'success');
+      log(`✅ Authenticated (Chain: ${chainId})`, 'success');
       return true;
       
     } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') {
+        log(`🔄 Token expired, re-authenticating...`, 'warning');
+        return this.login(privateKey, true);
+      }
       log(`❌ Auth failed: ${error.message}`, 'error');
       return false;
     }
   }
 
-  // ==================== DECK ====================
-
   async fetchDeck() {
     try {
-      const data = await this.apiClient.request('/api/earn/deck', { method: 'GET' });
+      const data = await this.apiClient.requestWithRetry('/api/earn/deck', { method: 'GET' });
       this.cards = data.cards || [];
       this.balance = data.balance || 0;
       this.earnedToday = data.earnedToday || 0;
       this.completedCards = this.cards.filter(c => c.answered).map(c => c.id);
       return data;
     } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') throw error;
       log(`Failed to fetch deck: ${error.message}`, 'error');
       return null;
     }
@@ -718,12 +813,20 @@ class SaviorOfHealthBot {
     if (crowdGuess !== null) payload.crowdGuess = crowdGuess;
     
     try {
-      const data = await this.apiClient.request('/api/earn/answer', {
+      const data = await this.apiClient.requestWithRetry('/api/earn/answer', {
         method: 'POST',
         body: JSON.stringify(payload)
       });
       
-      if (!data.ok) throw new Error('Answer submission failed');
+      if (!data || data === null) {
+        const card = this.cards.find(c => c.id === cardId);
+        if (card) card.answered = true;
+        return { ok: true, reward: 0, skipped: true };
+      }
+      
+      if (!data.ok) {
+        throw new Error('Invalid response from server');
+      }
       
       this.balance = data.balance || this.balance;
       this.earnedToday = data.earnedToday || 0;
@@ -736,7 +839,25 @@ class SaviorOfHealthBot {
       
       return data;
     } catch (error) {
-      log(`Failed to answer card: ${error.message}`, 'error');
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      
+      if ((error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') && CONFIG.skipOnServerError) {
+        log(`  ⏭️ Server/gateway error, skipping this card`, 'skip');
+        const card = this.cards.find(c => c.id === cardId);
+        if (card) card.answered = true;
+        return { ok: true, reward: 0, skipped: true };
+      }
+      
+      if (error.message.includes('Empty response') || error.message.includes('Invalid JSON') || error.message.includes('HTML response')) {
+        log(`  ⚠️ Invalid response. Skipping card.`, 'warning');
+        const card = this.cards.find(c => c.id === cardId);
+        if (card) card.answered = true;
+        return { ok: true, reward: 0, skipped: true };
+      }
+      
+      log(`  ❌ Failed to answer card: ${error.message}`, 'error');
+      const card = this.cards.find(c => c.id === cardId);
+      if (card) card.answered = true;
       return null;
     }
   }
@@ -751,7 +872,9 @@ class SaviorOfHealthBot {
     
     let cardCount = 0;
     let attempts = 0;
-    const maxAttempts = CONFIG.maxCardsPerDay || 50;
+    const maxAttempts = CONFIG.maxCardsPerDay || 10;
+    let consecutiveFailures = 0;
+    let serverErrorCount = 0;
     
     while (attempts < maxAttempts) {
       attempts++;
@@ -804,14 +927,31 @@ class SaviorOfHealthBot {
       
       const result = await this.answerCard(card.id, answer, guess);
       
-      if (result && result.reward) {
-        log(`  ${COLORS.brightYellow}🪙 +${result.reward} HP${COLORS.reset} (Balance: ${COLORS.brightWhite}${formatNumber(this.balance)}${COLORS.reset})`, 'success');
-        if (result.accuracy !== undefined && result.accuracy !== null) {
-          log(`  📊 Accuracy: ${result.accuracy}%`, 'debug');
+      if (result && result.ok !== false) {
+        consecutiveFailures = 0;
+        if (result.reward) {
+          log(`  ${COLORS.brightYellow}🪙 +${result.reward} HP${COLORS.reset} (Balance: ${COLORS.brightWhite}${formatNumber(this.balance)}${COLORS.reset})`, 'success');
+          if (result.accuracy !== undefined && result.accuracy !== null) {
+            log(`  📊 Accuracy: ${result.accuracy}%`, 'debug');
+          }
+        }
+      } else {
+        consecutiveFailures++;
+        serverErrorCount++;
+        log(`  ⚠️ Failed to answer card (${consecutiveFailures} consecutive failures)`, 'warning');
+        
+        if (serverErrorCount >= 5) {
+          log(`  ⛔ Too many server errors (${serverErrorCount}), stopping deck processing`, 'error');
+          break;
+        }
+        
+        if (consecutiveFailures >= 3) {
+          log(`  ⛔ Too many failures, skipping remaining cards`, 'error');
+          break;
         }
       }
       
-      await sleep(randomDelay(400, 1200));
+      await sleep(randomDelay(2000, 4000));
     }
     
     if (cardCount > 0) {
@@ -823,14 +963,13 @@ class SaviorOfHealthBot {
     return cardCount;
   }
 
-  // ==================== CAMPAIGNS ====================
-
   async fetchCampaigns() {
     try {
-      const data = await this.apiClient.request('/api/campaigns', { method: 'GET' });
+      const data = await this.apiClient.requestWithRetry('/api/campaigns', { method: 'GET' });
       this.campaigns = data.campaigns || [];
       return data;
     } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') throw error;
       log(`Failed to fetch campaigns: ${error.message}`, 'error');
       return null;
     }
@@ -858,13 +997,19 @@ class SaviorOfHealthBot {
     
     let completed = 0;
     let totalReward = 0;
+    let serverErrorCount = 0;
     
     for (const campaign of activeCampaigns) {
+      if (serverErrorCount >= 3) {
+        log(`⛔ Too many server errors, stopping campaigns`, 'error');
+        break;
+      }
+      
       const title = campaign.title?.substring(0, 35) || campaign.key || 'Campaign';
       log(`📋 ${title}...`, 'info');
       
       try {
-        const startData = await this.apiClient.request('/api/earn/log-chat', {
+        const startData = await this.apiClient.requestWithRetry('/api/earn/log-chat', {
           method: 'POST',
           body: JSON.stringify({ startCampaign: campaign.key })
         });
@@ -902,7 +1047,7 @@ class SaviorOfHealthBot {
             }
           }
           
-          const response = await this.apiClient.request('/api/earn/log-chat', {
+          const response = await this.apiClient.requestWithRetry('/api/earn/log-chat', {
             method: 'POST',
             body: JSON.stringify({
               message: typeof answer === 'string' ? answer : answer.join(', '),
@@ -912,7 +1057,7 @@ class SaviorOfHealthBot {
             })
           });
           
-          if (response.reward) {
+          if (response && response.reward) {
             this.balance = response.balance || this.balance;
             this.totalEarned += response.reward;
             campaignReward += response.reward;
@@ -920,8 +1065,8 @@ class SaviorOfHealthBot {
             log(`  ${COLORS.brightYellow}🪙 +${response.reward} HP${COLORS.reset}`, 'success');
           }
           
-          currentAsk = response.ask;
-          await sleep(randomDelay(300, 1000));
+          currentAsk = response?.ask;
+          await sleep(randomDelay(500, 1500));
         }
         
         completed++;
@@ -933,10 +1078,16 @@ class SaviorOfHealthBot {
         }
         
       } catch (error) {
-        log(`❌ Campaign failed: ${error.message}`, 'error');
+        if (error.message === 'AUTH_EXPIRED') throw error;
+        if (error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') {
+          serverErrorCount++;
+          log(`⚠️ Server/gateway error on campaign (${serverErrorCount}/3)`, 'warning');
+        } else {
+          log(`❌ Campaign failed: ${error.message}`, 'error');
+        }
       }
       
-      await sleep(randomDelay(1000, 2000));
+      await sleep(randomDelay(2000, 4000));
     }
     
     if (completed > 0) {
@@ -946,14 +1097,13 @@ class SaviorOfHealthBot {
     return completed;
   }
 
-  // ==================== BADGES ====================
-
   async fetchBadges() {
     try {
-      const data = await this.apiClient.request('/api/badges/sbt', { method: 'GET' });
+      const data = await this.apiClient.requestWithRetry('/api/badges/sbt', { method: 'GET' });
       this.badges = data.badges || [];
       return data;
     } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') throw error;
       log(`Failed to fetch badges: ${error.message}`, 'error');
       return null;
     }
@@ -982,17 +1132,17 @@ class SaviorOfHealthBot {
       log(`  🏅 ${badge.name} (${badge.tier})`, 'info');
       
       try {
-        const signatureData = await this.apiClient.request('/api/badges/sbt', {
+        const signatureData = await this.apiClient.requestWithRetry('/api/badges/sbt', {
           method: 'POST',
           body: JSON.stringify({ badgeKey: badge.key })
         });
         
-        if (signatureData.signature) {
+        if (signatureData?.signature) {
           const badgeClaimer = new BadgeClaimer(this.wallet.privateKey, this.proxyManager);
           await badgeClaimer.init();
           const txHash = await badgeClaimer.claimBadge(badge.key, signatureData.signature);
           if (txHash) {
-            await this.apiClient.request('/api/badges/sbt/confirm', {
+            await this.apiClient.requestWithRetry('/api/badges/sbt/confirm', {
               method: 'POST',
               body: JSON.stringify({ badgeKey: badge.key, txHash })
             });
@@ -1003,6 +1153,7 @@ class SaviorOfHealthBot {
           await sleep(randomDelay(1000, 2000));
         }
       } catch (error) {
+        if (error.message === 'AUTH_EXPIRED') throw error;
         log(`  ❌ Failed to get signature for ${badge.name}: ${error.message}`, 'error');
       }
     }
@@ -1014,14 +1165,17 @@ class SaviorOfHealthBot {
     return claimed;
   }
 
-  // ==================== WELLNESS GOALS ====================
-
   async fetchGoals() {
     try {
-      const data = await this.apiClient.request('/api/goals', { method: 'GET' });
+      const data = await this.apiClient.requestWithRetry('/api/goals', { method: 'GET' });
       this.goals = data;
       return data;
     } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') {
+        log(`⚠️ Goals API unavailable (server/gateway error)`, 'warning');
+        return null;
+      }
       log(`Failed to fetch goals: ${error.message}`, 'error');
       return null;
     }
@@ -1043,36 +1197,48 @@ class SaviorOfHealthBot {
     }
     
     let completed = 0;
+    let serverErrorCount = 0;
     
     for (const goal of this.goals.today.goals) {
+      if (serverErrorCount >= 5) {
+        log(`⛔ Too many server errors, stopping wellness goals`, 'error');
+        break;
+      }
+      
       if (!goal.done) {
-        switch (goal.key) {
-          case 'hydrate':
-            await this.logWater(250);
-            break;
-          case 'sleep':
-            await this.logSleep(goal.target || 7);
-            break;
-          case 'fuel':
-            await this.logMeal();
-            break;
-          case 'move':
-            await this.logExercise(goal.target || 20);
-            break;
-          case 'mind':
-          case 'meditate':
-            await this.logMeditation(goal.target || 5);
-            break;
-          case 'answer':
-            // Already handled by deck
-            break;
-          case 'triage':
-            await this.triageChat();
-            break;
-          default:
-            log(`  ⚠️ Unknown goal type: ${goal.key}`, 'warning');
+        try {
+          switch (goal.key) {
+            case 'hydrate':
+              await this.logWater(250);
+              break;
+            case 'sleep':
+              await this.logSleep(goal.target || 7);
+              break;
+            case 'fuel':
+              await this.logMeal();
+              break;
+            case 'move':
+              await this.logExercise(goal.target || 20);
+              break;
+            case 'mind':
+            case 'meditate':
+              await this.logMeditation(goal.target || 5);
+              break;
+            case 'answer':
+              break;
+            case 'triage':
+              await this.triageChat();
+              break;
+            default:
+              log(`  ⚠️ Unknown goal type: ${goal.key}`, 'warning');
+          }
+        } catch (error) {
+          if (error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') {
+            serverErrorCount++;
+            log(`⚠️ Server/gateway error on wellness (${serverErrorCount}/5)`, 'warning');
+          }
         }
-        await sleep(randomDelay(300, 800));
+        await sleep(randomDelay(500, 1500));
       }
     }
     
@@ -1096,12 +1262,10 @@ class SaviorOfHealthBot {
     return completed;
   }
 
-  // ==================== LOGGING METHODS (WORKING) ====================
-
   async logWater(ml) {
     try {
       const amount = Math.max(ml || 250, 250);
-      const data = await this.apiClient.request('/api/logs/water', {
+      const data = await this.apiClient.requestWithRetry('/api/logs/water', {
         method: 'POST',
         body: JSON.stringify({ amountMl: amount })
       });
@@ -1109,7 +1273,14 @@ class SaviorOfHealthBot {
       log(`  💧 Logged ${amount}ml water`, 'success');
       return data;
     } catch (error) {
-      log(`  ❌ Failed to log water: ${error.message}`, 'error');
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message.includes('409')) {
+        log(`  ⚠️ Already logged water today`, 'warning');
+        return null;
+      }
+      if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
+        log(`  ❌ Failed to log water: ${error.message}`, 'error');
+      }
       return null;
     }
   }
@@ -1119,8 +1290,7 @@ class SaviorOfHealthBot {
     
     try {
       const min = Math.max(minutes || 20, 10 + Math.floor(Math.random() * 30));
-      // WORKING: exerciseType + durationMin
-      const data = await this.apiClient.request('/api/logs/exercise', {
+      const data = await this.apiClient.requestWithRetry('/api/logs/exercise', {
         method: 'POST',
         body: JSON.stringify({ 
           exerciseType: 'walking',
@@ -1131,7 +1301,11 @@ class SaviorOfHealthBot {
       log(`  🏃 Logged ${min}min exercise`, 'success');
       return data;
     } catch (error) {
-      log(`  ❌ Failed to log exercise: ${error.message}`, 'error');
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message.includes('409')) {
+        log(`  ⚠️ Already logged exercise today`, 'warning');
+        return null;
+      }
       return null;
     }
   }
@@ -1139,14 +1313,13 @@ class SaviorOfHealthBot {
   async logSleep(hours) {
     try {
       const h = Math.max(hours || 7, 5 + Math.random() * 4);
-      // WORKING: bedtime + wakeTime
       const now = new Date();
       const bedtime = new Date(now);
       bedtime.setHours(23, 0, 0, 0);
       const wakeTime = new Date(bedtime);
       wakeTime.setHours(bedtime.getHours() + h, 0, 0, 0);
       
-      const data = await this.apiClient.request('/api/logs/sleep', {
+      const data = await this.apiClient.requestWithRetry('/api/logs/sleep', {
         method: 'POST',
         body: JSON.stringify({ 
           bedtime: bedtime.toISOString(),
@@ -1157,7 +1330,11 @@ class SaviorOfHealthBot {
       log(`  😴 Logged ${h.toFixed(1)}h sleep`, 'success');
       return data;
     } catch (error) {
-      log(`  ❌ Failed to log sleep: ${error.message}`, 'error');
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message.includes('409')) {
+        log(`  ⚠️ Already logged sleep today`, 'warning');
+        return null;
+      }
       return null;
     }
   }
@@ -1172,7 +1349,7 @@ class SaviorOfHealthBot {
       const food = foods[Math.floor(Math.random() * foods.length)];
       const calories = 200 + Math.floor(Math.random() * 400);
       
-      const data = await this.apiClient.request('/api/logs/meal', {
+      const data = await this.apiClient.requestWithRetry('/api/logs/meal', {
         method: 'POST',
         body: JSON.stringify({
           mealType: meal,
@@ -1184,7 +1361,11 @@ class SaviorOfHealthBot {
       log(`  🍽️ Logged ${meal}: ${food} (${calories} cal)`, 'success');
       return data;
     } catch (error) {
-      log(`  ❌ Failed to log meal: ${error.message}`, 'error');
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message.includes('409')) {
+        log(`  ⚠️ Already logged a meal today`, 'warning');
+        return null;
+      }
       return null;
     }
   }
@@ -1194,8 +1375,7 @@ class SaviorOfHealthBot {
     
     try {
       const min = Math.max(minutes || 5, 3 + Math.floor(Math.random() * 10));
-      // WORKING: durationMin + sessionType
-      const data = await this.apiClient.request('/api/logs/meditation', {
+      const data = await this.apiClient.requestWithRetry('/api/logs/meditation', {
         method: 'POST',
         body: JSON.stringify({ 
           durationMin: min,
@@ -1206,7 +1386,11 @@ class SaviorOfHealthBot {
       log(`  🧘 Logged ${min}min meditation`, 'success');
       return data;
     } catch (error) {
-      log(`  ❌ Failed to log meditation: ${error.message}`, 'error');
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message.includes('409')) {
+        log(`  ⚠️ Already logged meditation today`, 'warning');
+        return null;
+      }
       return null;
     }
   }
@@ -1214,7 +1398,7 @@ class SaviorOfHealthBot {
   async logMood(score) {
     try {
       const s = score || Math.floor(3 + Math.random() * 3);
-      const data = await this.apiClient.request('/api/logs/mood', {
+      const data = await this.apiClient.requestWithRetry('/api/logs/mood', {
         method: 'POST',
         body: JSON.stringify({ score: s })
       });
@@ -1222,16 +1406,14 @@ class SaviorOfHealthBot {
       log(`  😊 Logged mood: ${s}/5`, 'success');
       return data;
     } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
         log(`  ⚠️ Already logged mood today`, 'warning');
         return null;
       }
-      log(`  ❌ Failed to log mood: ${error.message}`, 'error');
       return null;
     }
   }
-
-  // ==================== TRIAGE CHAT (WORKING) ====================
 
   async triageChat() {
     if (!CONFIG.processTriage) {
@@ -1251,8 +1433,7 @@ class SaviorOfHealthBot {
       ];
       const symptom = symptoms[Math.floor(Math.random() * symptoms.length)];
       
-      // WORKING: message + agentType
-      const data = await this.apiClient.request('/api/chat', {
+      const data = await this.apiClient.requestWithRetry('/api/chat', {
         method: 'POST',
         body: JSON.stringify({ 
           message: symptom,
@@ -1262,7 +1443,7 @@ class SaviorOfHealthBot {
       
       this.dailyStats.triageChats++;
       
-      if (data.reward && data.reward.awarded) {
+      if (data?.reward && data.reward.awarded) {
         this.balance = data.balance || this.balance;
         this.totalEarned += data.reward.amount || 0;
         log(`  💬 +${data.reward.amount} HP for triage chat`, 'success');
@@ -1272,19 +1453,25 @@ class SaviorOfHealthBot {
       
       return data;
     } catch (error) {
-      log(`  ❌ Failed to triage chat: ${error.message}`, 'error');
+      if (error.message === 'AUTH_EXPIRED') throw error;
+      if (error.message.includes('409')) {
+        log(`  ⚠️ Already completed triage today`, 'warning');
+        return null;
+      }
+      if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
+        log(`  ❌ Failed to triage chat: ${error.message}`, 'error');
+      }
       return null;
     }
   }
 
-  // ==================== STAKING ====================
-
   async fetchStakeGoals() {
     try {
-      const data = await this.apiClient.request('/api/stake', { method: 'GET' });
+      const data = await this.apiClient.requestWithRetry('/api/stake', { method: 'GET' });
       this.stakeGoals = data;
       return data;
     } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') throw error;
       log(`Failed to fetch stake goals: ${error.message}`, 'error');
       return null;
     }
@@ -1292,7 +1479,7 @@ class SaviorOfHealthBot {
 
   async placeStake(goalKey, amount, label) {
     try {
-      const data = await this.apiClient.request('/api/stake', {
+      const data = await this.apiClient.requestWithRetry('/api/stake', {
         method: 'POST',
         body: JSON.stringify({ 
           goalKey: goalKey,
@@ -1301,13 +1488,14 @@ class SaviorOfHealthBot {
         })
       });
       this.dailyStats.stakesPlaced++;
-      if (data.balance) this.balance = data.balance;
+      if (data?.balance) this.balance = data.balance;
       log(`  🎯 Staked ${amount} HP on ${label || goalKey}`, 'success');
       return data;
     } catch (error) {
+      if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
         log(`  ⚠️ Already staked on ${goalKey} today`, 'warning');
-      } else {
+      } else if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
         log(`  ❌ Failed to stake on ${goalKey}: ${error.message}`, 'error');
       }
       return null;
@@ -1329,7 +1517,6 @@ class SaviorOfHealthBot {
       return 0;
     }
     
-    // Check for won stakes in history (auto-claimed)
     if (this.stakeGoals.history) {
       const wonStakes = this.stakeGoals.history.filter(s => s.status === 'won' && !s._claimed);
       for (const stake of wonStakes) {
@@ -1341,13 +1528,15 @@ class SaviorOfHealthBot {
       }
     }
     
-    // Place new stakes
     if (CONFIG.autoStake && this.stakeGoals.goals) {
       const stakeable = this.stakeGoals.goals.filter(g => g.editable !== false);
       const amount = CONFIG.stakeAmount || 10;
+      let staked = 0;
       for (const goal of stakeable) {
+        if (staked >= 3) break;
         if (this.balance >= amount) {
           await this.placeStake(goal.key, amount, goal.label);
+          staked++;
           await sleep(randomDelay(500, 1000));
         } else {
           log(`  ⚠️ Insufficient HP to stake on ${goal.key}`, 'warning');
@@ -1358,8 +1547,6 @@ class SaviorOfHealthBot {
     
     return 0;
   }
-
-  // ==================== PROCESS ACCOUNT ====================
 
   async processAccount(account) {
     const shortAddr = this.address ? 
@@ -1374,34 +1561,85 @@ class SaviorOfHealthBot {
     this.dailyStats.accountsProcessed++;
     this.apiClient.refreshUserAgent();
     
-    if (!await this.login(account.privateKey)) {
+    let loginSuccess = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (await this.login(account.privateKey)) {
+        loginSuccess = true;
+        break;
+      }
+      if (attempt < 3) {
+        log(`🔄 Login attempt ${attempt} failed, retrying...`, 'warning');
+        await sleep(2000);
+      }
+    }
+    
+    if (!loginSuccess) {
+      log(`❌ Failed to login after 3 attempts`, 'error');
       return null;
     }
     
-    const cardsAnswered = await this.processDeck();
-    const campaignsCompleted = await this.processCampaigns();
-    const badgesClaimed = await this.processBadges();
-    await this.processWellness();
-    await this.processStaking();
+    const cardsAnswered = await this.processDeck().catch(e => {
+      if (e.message === 'AUTH_EXPIRED') {
+        log(`🔄 Token expired during deck, re-logging...`, 'warning');
+        return this.login(account.privateKey, true).then(() => this.processDeck()).catch(() => 0);
+      }
+      log(`⚠️ Deck processing failed: ${e.message}`, 'warning');
+      return 0;
+    });
     
-    // Log all activities (only working endpoints)
-    await this.logWater(250);
-    await this.logExercise(0);
-    await this.logSleep(0);
-    await this.logMeal();
-    await this.logMeditation(0);
-    await this.logMood();
-    await this.triageChat();
+    const campaignsCompleted = await this.processCampaigns().catch(e => {
+      if (e.message === 'AUTH_EXPIRED') {
+        log(`🔄 Token expired during campaigns, re-logging...`, 'warning');
+        return this.login(account.privateKey, true).then(() => this.processCampaigns()).catch(() => 0);
+      }
+      log(`⚠️ Campaigns failed: ${e.message}`, 'warning');
+      return 0;
+    });
     
-    await this.fetchDeck();
+    const badgesClaimed = await this.processBadges().catch(e => {
+      if (e.message === 'AUTH_EXPIRED') {
+        log(`🔄 Token expired during badges, re-logging...`, 'warning');
+        return this.login(account.privateKey, true).then(() => this.processBadges()).catch(() => 0);
+      }
+      log(`⚠️ Badges failed: ${e.message}`, 'warning');
+      return 0;
+    });
+    
+    await this.processWellness().catch(e => {
+      if (e.message === 'AUTH_EXPIRED') {
+        log(`🔄 Token expired during wellness, re-logging...', 'warning');
+        return this.login(account.privateKey, true).then(() => this.processWellness()).catch(() => {});
+      }
+      if (!e.message.includes('SERVER_ERROR') && !e.message.includes('GATEWAY_ERROR')) {
+        log(`⚠️ Wellness failed: ${e.message}`, 'warning');
+      }
+    });
+    
+    await this.processStaking().catch(e => {
+      if (e.message === 'AUTH_EXPIRED') {
+        log(`🔄 Token expired during staking, re-logging...', 'warning');
+        return this.login(account.privateKey, true).then(() => this.processStaking()).catch(() => {});
+      }
+      log(`⚠️ Staking failed: ${e.message}`, 'warning');
+    });
+    
+    await this.logWater(250).catch(() => {});
+    await this.logExercise(0).catch(() => {});
+    await this.logSleep(0).catch(() => {});
+    await this.logMeal().catch(() => {});
+    await this.logMeditation(0).catch(() => {});
+    await this.logMood().catch(() => {});
+    await this.triageChat().catch(() => {});
+    
+    await this.fetchDeck().catch(() => {});
     
     const result = {
       address: this.address,
       balance: this.balance,
       earnedToday: this.earnedToday,
-      cardsAnswered: cardsAnswered,
-      campaignsCompleted: campaignsCompleted,
-      badgesClaimed: badgesClaimed,
+      cardsAnswered: this.dailyStats.totalCardsAnswered,
+      campaignsCompleted: this.dailyStats.totalCampaignsCompleted,
+      badgesClaimed: this.dailyStats.badgesClaimed,
       totalEarned: this.totalEarned,
       aiAnswers: this.dailyStats.aiAnswers,
       aiAttempts: this.dailyStats.aiAttempts,
@@ -1421,9 +1659,9 @@ class SaviorOfHealthBot {
     logBanner(`✅ Account Complete!`);
     log(`💰 Balance: ${formatNumber(this.balance)} HP`, 'coin');
     log(`💫 Earned: ${formatNumber(this.totalEarned)} HP`, 'success');
-    log(`📚 Cards: ${cardsAnswered}`, 'info');
-    log(`🏥 Campaigns: ${campaignsCompleted}`, 'info');
-    log(`🏅 Badges: ${badgesClaimed}`, 'badge');
+    log(`📚 Cards: ${this.dailyStats.totalCardsAnswered}`, 'info');
+    log(`🏥 Campaigns: ${this.dailyStats.totalCampaignsCompleted}`, 'info');
+    log(`🏅 Badges: ${this.dailyStats.badgesClaimed}`, 'badge');
     log(`💪 Wellness: ${this.dailyStats.wellnessGoalsCompleted}`, 'wellness');
     log(`💧 Water: ${this.dailyStats.waterMl}ml`, 'water');
     log(`😊 Mood: ${this.dailyStats.moodLogged ? '✅' : '❌'}`, 'mood');
@@ -1437,10 +1675,7 @@ class SaviorOfHealthBot {
     return result;
   }
 
-  // ==================== RUN ====================
-
   async run() {
-    // Track totals across all accounts
     const grandTotal = {
       accountsProcessed: 0,
       totalHP: 0,
@@ -1474,7 +1709,6 @@ class SaviorOfHealthBot {
       const allResults = [];
       let successful = 0;
       
-      // Reset per-run stats
       const runStats = {
         totalHP: 0,
         totalCardsAnswered: 0,
@@ -1505,7 +1739,6 @@ class SaviorOfHealthBot {
           successful++;
           allResults.push(result);
           
-          // Accumulate run totals
           runStats.totalHP += result.balance || 0;
           runStats.totalCardsAnswered += result.cardsAnswered || 0;
           runStats.totalCampaignsCompleted += result.campaignsCompleted || 0;
@@ -1524,7 +1757,6 @@ class SaviorOfHealthBot {
           runStats.aiAnswers += result.aiAnswers || 0;
           runStats.aiAttempts += result.aiAttempts || 0;
           
-          // Accumulate grand totals
           grandTotal.accountsProcessed++;
           grandTotal.totalHP += result.balance || 0;
           grandTotal.totalCardsAnswered += result.cardsAnswered || 0;
@@ -1591,7 +1823,6 @@ class SaviorOfHealthBot {
         }
       }
       
-      // Sleep until next day
       if (CONFIG.sleepUntilNextDay) {
         const timeUntil = getTimeUntilNextDay();
         const hours = Math.floor(timeUntil / (1000 * 60 * 60));
@@ -1623,8 +1854,6 @@ class SaviorOfHealthBot {
   }
 }
 
-// ==================== MENU ====================
-
 function showMenu() {
   console.log(`\n${COLORS.brightCyan}${'═'.repeat(60)}${COLORS.reset}`);
   console.log(`${COLORS.brightYellow}  SAVIOROFHEALTH BOT MENU  ${COLORS.reset}`);
@@ -1645,8 +1874,6 @@ function askQuestion(query) {
     resolve(answer);
   }));
 }
-
-// ==================== MAIN ====================
 
 async function main() {
   while (true) {
