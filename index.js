@@ -25,6 +25,12 @@ function loadConfig() {
     processMindspace: true,
     processTriage: true,
     processAgents: true,
+    processDailyCheckin: true,
+    processDailyQuiz: true,
+    processPulse: true,
+    processReferral: true,
+    completeProfile: true,
+    processMissions: true,
     stakeGoals: true,
     stakeAmount: 10,
     autoStake: true,
@@ -109,6 +115,13 @@ function log(message, type = 'info', data = null) {
     mood: { color: COLORS.brightMagenta, icon: '😊' },
     skip: { color: COLORS.brightYellow, icon: '⏭️' },
     agent: { color: COLORS.brightMagenta, icon: '🤖' },
+    checkin: { color: COLORS.brightGreen, icon: '📋' },
+    quiz: { color: COLORS.brightCyan, icon: '🧪' },
+    pulse: { color: COLORS.brightMagenta, icon: '📊' },
+    referral: { color: COLORS.brightYellow, icon: '🔗' },
+    profile: { color: COLORS.brightBlue, icon: '👤' },
+    rank: { color: COLORS.brightYellow, icon: '🏆' },
+    mission: { color: COLORS.brightGreen, icon: '🎯' },
   };
   const style = styles[type] || styles.info;
   const prefix = `${style.color}${style.icon}${COLORS.reset}`;
@@ -202,6 +215,22 @@ function getNextDayStart() {
 
 function getTimeUntilNextDay() {
   return getNextDayStart() - Date.now();
+}
+
+function getRank(hp) {
+  const ranks = [
+    { min: 0, name: 'Dormant', color: '#9CB3A0', icon: 'dormant' },
+    { min: 2500, name: 'Awake', color: '#38BDF8', icon: 'awake' },
+    { min: 5000, name: 'Vital', color: '#3DE68C', icon: 'vital' },
+    { min: 12000, name: 'Radiant', color: '#A78BFA', icon: 'radiant' },
+    { min: 30000, name: 'Savior', color: '#EAB308', icon: 'savior' },
+  ];
+  let current = ranks[0];
+  for (const rank of ranks) {
+    if (hp >= rank.min) current = rank;
+  }
+  const next = ranks.find(r => r.min > hp);
+  return { current, next };
 }
 
 class ProxyManager {
@@ -620,7 +649,9 @@ class ApiClient {
         lastError = error;
         
         if (error.message === 'AUTH_EXPIRED') throw error;
-        if (error.message.includes('400') || error.message.includes('422')) throw error;
+        if (error.message.includes('400') || error.message.includes('422') || error.message.includes('409')) {
+          throw error;
+        }
         
         if ((error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') && CONFIG.skipOnServerError) {
           log('Server/gateway error, skipping this request', 'skip');
@@ -728,6 +759,9 @@ class SaviorOfHealthBot {
     this.goals = null;
     this.stakeGoals = null;
     this.chainId = CONFIG.chainId || 56;
+    this.referralLink = null;
+    this.rank = null;
+    this._referralBonus = 0;
     this.dailyStats = {
       accountsProcessed: 0,
       totalHP: 0,
@@ -749,6 +783,13 @@ class SaviorOfHealthBot {
       stakesLost: 0,
       agentChats: 0,
       agentRewards: 0,
+      dailyCheckinClaimed: false,
+      quizCompleted: false,
+      pulseAnswered: false,
+      profileCompleted: false,
+      referralGenerated: false,
+      missionsClaimed: 0,
+      missionsReward: 0,
     };
   }
 
@@ -799,6 +840,28 @@ class SaviorOfHealthBot {
       }
       log('Auth failed: ' + error.message, 'error');
       return false;
+    }
+  }
+
+  async applyReferralIfNeeded() {
+    try {
+      const ref = await this.apiClient.request('/api/referral', { method: 'GET' });
+      if (ref && ref.code) {
+        return;
+      }
+      const REFERRAL_CODE = 'K33MUPP8';
+      const result = await this.apiClient.request('/api/referral/apply', {
+        method: 'POST',
+        body: JSON.stringify({ code: REFERRAL_CODE })
+      });
+      if (result && result.ok) {
+        if (result.reward) {
+          this.balance = result.balance || this.balance;
+          this.totalEarned += result.reward;
+          this._referralBonus = result.reward;
+        }
+      }
+    } catch (error) {
     }
   }
 
@@ -1040,7 +1103,8 @@ class SaviorOfHealthBot {
               if (!answer) answer = 'I feel healthy today.';
             } else if (currentAsk.kind === 'multi') {
               const shuffled = [...currentAsk.options].sort(() => Math.random() - 0.5);
-              answer = shuffled.slice(0, Math.min(currentAsk.options.length, 1 + Math.floor(Math.random() * 2)));
+              const count = 1 + Math.floor(Math.random() * Math.min(2, currentAsk.options.length - 1));
+              answer = shuffled.slice(0, count);
             } else {
               answer = await this.groq.ask(currentAsk.options && currentAsk.options[0] ? currentAsk.options[0] : 'How are you?', currentAsk.options, this.proxyManager);
               if (!answer) answer = currentAsk.options[Math.floor(Math.random() * currentAsk.options.length)];
@@ -1051,7 +1115,8 @@ class SaviorOfHealthBot {
               answer = 'I feel healthy today.';
             } else if (currentAsk.kind === 'multi') {
               const shuffled = [...currentAsk.options].sort(() => Math.random() - 0.5);
-              answer = shuffled.slice(0, Math.min(currentAsk.options.length, 1 + Math.floor(Math.random() * 2)));
+              const count = 1 + Math.floor(Math.random() * Math.min(2, currentAsk.options.length - 1));
+              answer = shuffled.slice(0, count);
             } else {
               answer = currentAsk.options[Math.floor(Math.random() * currentAsk.options.length)];
             }
@@ -1184,7 +1249,6 @@ class SaviorOfHealthBot {
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') {
-        log('Goals API unavailable (server/gateway error)', 'warning');
         return null;
       }
       log('Failed to fetch goals: ' + error.message, 'error');
@@ -1192,91 +1256,10 @@ class SaviorOfHealthBot {
     }
   }
 
-  async processWellness() {
-    if (!CONFIG.processWellness) {
-      log('Wellness processing disabled', 'warning');
-      return 0;
-    }
-
-    logBanner('Processing Wellness Goals');
-    
-    await this.fetchGoals();
-    
-    if (!this.goals || !this.goals.today || !this.goals.today.goals) {
-      log('No wellness goals for today', 'info');
-      return 0;
-    }
-    
-    let completed = 0;
-    let serverErrorCount = 0;
-    
-    for (const goal of this.goals.today.goals) {
-      if (serverErrorCount >= 5) {
-        log('Too many server errors, stopping wellness goals', 'error');
-        break;
-      }
-      
-      if (!goal.done) {
-        try {
-          switch (goal.key) {
-            case 'hydrate':
-              await this.logWater(250);
-              break;
-            case 'sleep':
-              await this.logSleep(goal.target || 7);
-              break;
-            case 'fuel':
-              await this.logMeal();
-              break;
-            case 'move':
-              await this.logExercise(goal.target || 20);
-              break;
-            case 'mind':
-            case 'meditate':
-              await this.logMeditation(goal.target || 5);
-              break;
-            case 'answer':
-              break;
-            case 'triage':
-              await this.triageChat();
-              break;
-            default:
-              log('  Unknown goal type: ' + goal.key, 'warning');
-          }
-        } catch (error) {
-          if (error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') {
-            serverErrorCount++;
-            log('Server/gateway error on wellness (' + serverErrorCount + '/5)', 'warning');
-          }
-        }
-        await sleep(randomDelay(500, 1500));
-      }
-    }
-    
-    await this.fetchGoals();
-    
-    if (this.goals && this.goals.today) {
-      for (const goal of this.goals.today.goals) {
-        if (goal.done && !goal._completed) {
-          goal._completed = true;
-          completed++;
-          this.dailyStats.wellnessGoalsCompleted++;
-          log('  ' + goal.label + ' - completed!', 'success');
-        }
-      }
-    }
-    
-    if (completed > 0) {
-      log('Completed ' + completed + ' wellness goals', 'success');
-    }
-    
-    return completed;
-  }
-
   async logWater(ml) {
     try {
       const amount = Math.max(ml || 250, 250);
-      const data = await this.apiClient.requestWithRetry('/api/logs/water', {
+      const data = await this.apiClient.request('/api/logs/water', {
         method: 'POST',
         body: JSON.stringify({ amountMl: amount })
       });
@@ -1297,11 +1280,9 @@ class SaviorOfHealthBot {
   }
 
   async logExercise(minutes) {
-    if (!CONFIG.processWellness) return null;
-    
     try {
       const min = Math.max(minutes || 20, 10 + Math.floor(Math.random() * 30));
-      const data = await this.apiClient.requestWithRetry('/api/logs/exercise', {
+      const data = await this.apiClient.request('/api/logs/exercise', {
         method: 'POST',
         body: JSON.stringify({ 
           exerciseType: 'walking',
@@ -1330,7 +1311,7 @@ class SaviorOfHealthBot {
       const wakeTime = new Date(bedtime);
       wakeTime.setHours(bedtime.getHours() + Math.floor(h), bedtime.getMinutes() + Math.round((h % 1) * 60), 0, 0);
       
-      const data = await this.apiClient.requestWithRetry('/api/logs/sleep', {
+      const data = await this.apiClient.request('/api/logs/sleep', {
         method: 'POST',
         body: JSON.stringify({ 
           bedtime: bedtime.toISOString(),
@@ -1360,7 +1341,7 @@ class SaviorOfHealthBot {
       const food = foods[Math.floor(Math.random() * foods.length)];
       const calories = 200 + Math.floor(Math.random() * 400);
       
-      const data = await this.apiClient.requestWithRetry('/api/logs/meal', {
+      const data = await this.apiClient.request('/api/logs/meal', {
         method: 'POST',
         body: JSON.stringify({
           mealType: meal,
@@ -1385,16 +1366,19 @@ class SaviorOfHealthBot {
     if (!CONFIG.processMindspace) return null;
     
     try {
+      const sessionTypes = ['guided', 'breathing', 'body_scan', 'free'];
       const min = Math.max(minutes || 5, 3 + Math.floor(Math.random() * 10));
-      const data = await this.apiClient.requestWithRetry('/api/logs/meditation', {
+      const type = sessionTypes[Math.floor(Math.random() * sessionTypes.length)];
+      
+      const data = await this.apiClient.request('/api/logs/meditation', {
         method: 'POST',
         body: JSON.stringify({ 
           durationMin: min,
-          sessionType: 'guided'
+          sessionType: type
         })
       });
       this.dailyStats.meditationMinutes += min;
-      log('  Logged ' + min + 'min meditation', 'success');
+      log('  Logged ' + min + 'min ' + type + ' meditation', 'success');
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
@@ -1409,7 +1393,7 @@ class SaviorOfHealthBot {
   async logMood(score) {
     try {
       const s = score || Math.floor(3 + Math.random() * 3);
-      const data = await this.apiClient.requestWithRetry('/api/logs/mood', {
+      const data = await this.apiClient.request('/api/logs/mood', {
         method: 'POST',
         body: JSON.stringify({ score: s })
       });
@@ -1421,6 +1405,9 @@ class SaviorOfHealthBot {
       if (error.message.includes('409')) {
         log('  Already logged mood today', 'warning');
         return null;
+      }
+      if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
+        log('  Failed to log mood: ' + error.message, 'error');
       }
       return null;
     }
@@ -1444,7 +1431,7 @@ class SaviorOfHealthBot {
       ];
       const symptom = symptoms[Math.floor(Math.random() * symptoms.length)];
       
-      const data = await this.apiClient.requestWithRetry('/api/chat', {
+      const data = await this.apiClient.request('/api/chat', {
         method: 'POST',
         body: JSON.stringify({ 
           message: symptom,
@@ -1476,7 +1463,304 @@ class SaviorOfHealthBot {
     }
   }
 
-  // ==================== AI AGENTS (NEW) ====================
+  async processDailyCheckin() {
+    if (!CONFIG.processDailyCheckin) {
+      return null;
+    }
+    try {
+      const missions = await this.apiClient.request('/api/missions', { method: 'GET' });
+      if (!missions || !missions.missions) return null;
+      const checkinMission = missions.missions.find(m => m.key === 'daily-checkin');
+      if (!checkinMission || checkinMission.completed || checkinMission.locked) return null;
+      const result = await this.apiClient.request('/api/missions/daily-checkin/claim', {
+        method: 'POST'
+      });
+      if (result && result.reward) {
+        this.balance = result.balance || this.balance;
+        this.totalEarned += result.reward;
+        this.dailyStats.dailyCheckinClaimed = true;
+        log('  +' + result.reward + ' HP daily check-in', 'checkin');
+        return result;
+      }
+      return null;
+    } catch (error) {
+      if (error.message.includes('409')) {
+        log('  Daily check-in already claimed', 'warning');
+      }
+      return null;
+    }
+  }
+
+  async processDailyQuiz() {
+    if (!CONFIG.processDailyQuiz) {
+      return null;
+    }
+    try {
+      const quiz = await this.apiClient.request('/api/quiz/today', { method: 'GET' });
+      if (!quiz || quiz.done) return null;
+      let answer;
+      if (CONFIG.useGroqAI && this.groq.apiKeys.length > 0) {
+        this.dailyStats.aiAttempts++;
+        answer = await this.groq.ask(quiz.question, quiz.options, this.proxyManager);
+        this.dailyStats.aiAnswers++;
+        if (!answer) answer = quiz.options[Math.floor(Math.random() * quiz.options.length)];
+      } else {
+        answer = quiz.options[Math.floor(Math.random() * quiz.options.length)];
+      }
+      const result = await this.apiClient.request('/api/quiz/answer', {
+        method: 'POST',
+        body: JSON.stringify({ choice: answer })
+      });
+      if (result && result.correct) {
+        this.balance = result.balance || this.balance;
+        const reward = result.reward || quiz.reward || 0;
+        this.totalEarned += reward;
+        this.dailyStats.quizCompleted = true;
+        log('  Quiz correct! +' + reward + ' HP', 'quiz');
+        return result;
+      }
+      return null;
+    } catch (error) {
+      if (error.message.includes('409')) {
+        log('  Quiz already completed', 'warning');
+      }
+      return null;
+    }
+  }
+
+  async processPulse() {
+    if (!CONFIG.processPulse) {
+      return null;
+    }
+    try {
+      const pulse = await this.apiClient.request('/api/pulse/today', { method: 'GET' });
+      if (!pulse || pulse.answered || !pulse.survey) return null;
+      let answer;
+      let guess = Math.floor(25 + Math.random() * 50);
+      if (CONFIG.useGroqAI && this.groq.apiKeys.length > 0) {
+        this.dailyStats.aiAttempts++;
+        answer = await this.groq.ask(pulse.survey.question, pulse.survey.options, this.proxyManager);
+        this.dailyStats.aiAnswers++;
+        if (!answer) answer = pulse.survey.options[Math.floor(Math.random() * pulse.survey.options.length)];
+      } else {
+        answer = pulse.survey.options[Math.floor(Math.random() * pulse.survey.options.length)];
+      }
+      const result = await this.apiClient.request('/api/pulse/answer', {
+        method: 'POST',
+        body: JSON.stringify({ answer: answer, crowdGuess: guess })
+      });
+      if (result && result.ok) {
+        this.balance = result.balance || this.balance;
+        const reward = result.reward || pulse.survey.reward || 0;
+        this.totalEarned += reward;
+        this.dailyStats.pulseAnswered = true;
+        log('  Pulse answered! Guess: ' + guess + '% +' + reward + ' HP', 'pulse');
+        return result;
+      }
+      return null;
+    } catch (error) {
+      if (error.message.includes('409')) {
+        log('  Pulse already answered', 'warning');
+      }
+      return null;
+    }
+  }
+
+  async processPulseReveal() {
+    try {
+      const result = await this.apiClient.request('/api/pulse/yesterday', { method: 'GET' });
+      if (result && result.actualPct !== undefined) {
+        log('  Yesterday\'s pulse: ' + result.actualPct + '% (you guessed ' + result.yourGuess + '%)', 'pulse');
+        if (result.reward > 0) {
+          this.balance = result.balance || this.balance;
+          this.totalEarned += result.reward;
+          log('  +' + result.reward + ' HP pulse bonus!', 'success');
+        }
+        return result;
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async processReferral() {
+    if (!CONFIG.processReferral) {
+      return null;
+    }
+    try {
+      const ref = await this.apiClient.request('/api/referral', { method: 'GET' });
+      if (ref && ref.code) {
+        this.referralLink = ref.link;
+        if (ref.qualified > 0 && ref.newlyQualified > 0) {
+          const reward = ref.newlyQualified * ref.rewardPerReferral;
+          this.balance = ref.balance || this.balance;
+          this.totalEarned += reward;
+          log('  +' + reward + ' HP from ' + ref.newlyQualified + ' qualified referral(s)!', 'success');
+        }
+        return ref;
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async completeProfile() {
+    if (!CONFIG.completeProfile) {
+      return null;
+    }
+    try {
+      const me = await this.apiClient.request('/api/auth/me', { method: 'GET' });
+      if (me.user && me.user.displayName) {
+        return null;
+      }
+      const regions = ['North America', 'Latin America', 'Europe', 'Middle East & Africa', 'South Asia', 'East Asia', 'Southeast Asia', 'Oceania'];
+      const names = ['Alex', 'Jordan', 'Taylor', 'Morgan', 'Riley', 'Avery', 'Quinn', 'Emerson'];
+      const profile = {
+        displayName: names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 1000),
+        age: Math.floor(25 + Math.random() * 40),
+        region: regions[Math.floor(Math.random() * regions.length)],
+        heightCm: Math.floor(160 + Math.random() * 30),
+        weightKg: Math.floor(60 + Math.random() * 40),
+        chronicConditions: [],
+        dataConsent: true
+      };
+      const result = await this.apiClient.request('/api/auth/profile', {
+        method: 'POST',
+        body: JSON.stringify(profile)
+      });
+      if (result && result.user) {
+        this.balance = result.user.tokenBalance || this.balance;
+        const bonus = 25;
+        this.totalEarned += bonus;
+        this.dailyStats.profileCompleted = true;
+        log('  +' + bonus + ' HP profile completed!', 'profile');
+        return result;
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async processAllMissions() {
+    if (!CONFIG.processMissions) {
+      return 0;
+    }
+    try {
+      const missions = await this.apiClient.request('/api/missions', { method: 'GET' });
+      if (!missions || !missions.missions) return 0;
+      let claimed = 0;
+      let totalReward = 0;
+      const skipKeys = ['follow-x', 'join-tg', 'rt-launch', 'quote-x'];
+      for (const mission of missions.missions) {
+        if (mission.completed || mission.locked || skipKeys.includes(mission.key) || !mission.eligible) {
+          continue;
+        }
+        try {
+          const result = await this.apiClient.request('/api/missions/' + mission.key + '/claim', {
+            method: 'POST'
+          });
+          if (result && result.ok) {
+            this.balance = result.balance || this.balance;
+            this.totalEarned += mission.reward;
+            claimed++;
+            totalReward += mission.reward;
+            log('  +' + mission.reward + ' HP: ' + mission.title, 'mission');
+          }
+        } catch (error) {
+          if (error.message.includes('409')) {
+          }
+        }
+        await sleep(randomDelay(300, 800));
+      }
+      this.dailyStats.missionsClaimed = claimed;
+      this.dailyStats.missionsReward = totalReward;
+      if (claimed > 0) {
+        log('Claimed ' + claimed + ' missions (' + totalReward + ' HP)', 'success');
+      }
+      return totalReward;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  async trackRank() {
+    try {
+      const rank = getRank(this.balance);
+      this.rank = rank;
+      if (rank.current && rank.current.name) {
+        log('  Rank: ' + rank.current.name + ' (' + formatNumber(this.balance) + ' HP)', 'rank');
+        if (rank.next) {
+          log('  Next rank: ' + rank.next.name + ' at ' + formatNumber(rank.next.min) + ' HP (' + formatNumber(rank.next.min - this.balance) + ' to go)', 'rank');
+        }
+      }
+      return rank;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async processWellnessLogging() {
+    if (!CONFIG.processWellness) {
+      return 0;
+    }
+    logBanner('Logging Wellness Activities');
+    let completed = 0;
+    await this.fetchGoals();
+    if (this.goals && this.goals.today && this.goals.today.goals) {
+      for (const goal of this.goals.today.goals) {
+        if (!goal.done) {
+          try {
+            switch (goal.key) {
+              case 'hydrate':
+                await this.logWater(250);
+                break;
+              case 'sleep':
+                await this.logSleep(goal.target || 7);
+                break;
+              case 'fuel':
+                await this.logMeal();
+                break;
+              case 'move':
+                await this.logExercise(goal.target || 20);
+                break;
+              case 'mind':
+              case 'meditate':
+                await this.logMeditation(goal.target || 5);
+                break;
+              case 'triage':
+                await this.triageChat();
+                break;
+              default:
+                break;
+            }
+          } catch (error) {
+          }
+          await sleep(randomDelay(500, 1500));
+        }
+      }
+      await this.fetchGoals();
+      if (this.goals && this.goals.today) {
+        for (const goal of this.goals.today.goals) {
+          if (goal.done && !goal._completed) {
+            goal._completed = true;
+            completed++;
+            this.dailyStats.wellnessGoalsCompleted++;
+          }
+        }
+      }
+    }
+    await this.logWater(250).catch(() => {});
+    await this.logExercise(0).catch(() => {});
+    await this.logSleep(0).catch(() => {});
+    await this.logMeal().catch(() => {});
+    await this.logMeditation(0).catch(() => {});
+    await this.logMood().catch(() => {});
+    await this.triageChat().catch(() => {});
+    return completed;
+  }
 
   getAgentConfigs() {
     return {
@@ -1491,7 +1775,6 @@ class SaviorOfHealthBot {
           'What is your mood like today?',
           'Have you been active today?'
         ],
-        followUps: ['I didnt sleep well', 'Help me build a healthy routine', 'Check my BMI']
       },
       gatekeeper: {
         id: 'gatekeeper',
@@ -1534,27 +1817,24 @@ class SaviorOfHealthBot {
 
   async chatWithAgent(agentType, message) {
     try {
-      const data = await this.apiClient.requestWithRetry('/api/chat', {
+      const data = await this.apiClient.request('/api/chat', {
         method: 'POST',
         body: JSON.stringify({
           message: message,
           agentType: agentType
         })
       });
-      
       if (data && data.reward && data.reward.awarded) {
         this.balance = data.balance || this.balance;
         this.totalEarned += data.reward.amount || 0;
         this.dailyStats.agentRewards += data.reward.amount || 0;
         log('  +' + data.reward.amount + ' HP from ' + agentType + ' chat', 'success');
       }
-      
       this.dailyStats.agentChats++;
       return data;
     } catch (error) {
-      if (error.message === 'AUTH_EXPIRED') throw error;
-      if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
-        log('  Chat with ' + agentType + ' failed: ' + error.message, 'warning');
+      if (error.message.includes('409')) {
+        log('  Already chatted with ' + agentType + ' today', 'warning');
       }
       return null;
     }
@@ -1565,50 +1845,43 @@ class SaviorOfHealthBot {
       log('AI Agent processing disabled', 'warning');
       return 0;
     }
-
     logBanner('Processing AI Agents');
-    
     const agents = this.getAgentConfigs();
     let totalReward = 0;
     let successCount = 0;
-    
     for (const [type, config] of Object.entries(agents)) {
       const question = config.questions[Math.floor(Math.random() * config.questions.length)];
       log('  ' + config.icon + ' Talking to ' + config.name + ' (' + type + ')...', 'agent');
-      
       const result = await this.chatWithAgent(type, question);
       if (result && result.reward && result.reward.awarded) {
         totalReward += result.reward.amount || 0;
         successCount++;
       }
-      
       await sleep(randomDelay(1500, 3000));
     }
-    
     if (successCount > 0) {
       log('Completed ' + successCount + ' AI agent chats (' + totalReward + ' HP)', 'success');
-    } else {
-      log('No AI agent chats completed', 'info');
     }
-    
     return totalReward;
   }
 
   async fetchStakeGoals() {
     try {
-      const data = await this.apiClient.requestWithRetry('/api/stake', { method: 'GET' });
+      const data = await this.apiClient.request('/api/stake', { method: 'GET' });
       this.stakeGoals = data;
       return data;
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
-      log('Failed to fetch stake goals: ' + error.message, 'error');
+      if (error.message.includes('400') || error.message.includes('409')) {
+        return null;
+      }
       return null;
     }
   }
 
   async placeStake(goalKey, amount, label) {
     try {
-      const data = await this.apiClient.requestWithRetry('/api/stake', {
+      const data = await this.apiClient.request('/api/stake', {
         method: 'POST',
         body: JSON.stringify({ 
           goalKey: goalKey,
@@ -1618,12 +1891,13 @@ class SaviorOfHealthBot {
       });
       this.dailyStats.stakesPlaced++;
       if (data && data.balance) this.balance = data.balance;
-      log('  Staked ' + amount + ' HP on ' + (label || goalKey), 'success');
+      log('  Staked ' + amount + ' HP on ' + (label || goalKey), 'stake');
       return data;
     } catch (error) {
-      if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message.includes('409')) {
         log('  Already staked on ' + goalKey + ' today', 'warning');
+      } else if (error.message.includes('400')) {
+        log('  Goal not ready for staking yet', 'warning');
       } else if (error.message !== 'SERVER_ERROR' && error.message !== 'GATEWAY_ERROR') {
         log('  Failed to stake on ' + goalKey + ': ' + error.message, 'error');
       }
@@ -1633,19 +1907,14 @@ class SaviorOfHealthBot {
 
   async processStaking() {
     if (!CONFIG.stakeGoals) {
-      log('Staking disabled', 'warning');
       return 0;
     }
-
     logBanner('Processing Staking');
-    
     await this.fetchStakeGoals();
-    
     if (!this.stakeGoals) {
-      log('Failed to fetch stake goals', 'error');
+      log('  No staking data available', 'warning');
       return 0;
     }
-    
     if (this.stakeGoals.history) {
       const wonStakes = this.stakeGoals.history.filter(s => s.status === 'won' && !s._claimed);
       for (const stake of wonStakes) {
@@ -1656,7 +1925,6 @@ class SaviorOfHealthBot {
         log('  Won stake! +' + stake.payout + ' HP for ' + stake.label, 'success');
       }
     }
-    
     if (CONFIG.autoStake && this.stakeGoals.goals) {
       const stakeable = this.stakeGoals.goals.filter(g => g.editable !== false);
       const amount = CONFIG.stakeAmount || 10;
@@ -1668,12 +1936,10 @@ class SaviorOfHealthBot {
           staked++;
           await sleep(randomDelay(500, 1000));
         } else {
-          log('  Insufficient HP to stake on ' + goal.key, 'warning');
           break;
         }
       }
     }
-    
     return 0;
   }
 
@@ -1706,69 +1972,31 @@ class SaviorOfHealthBot {
       log('Failed to login after 3 attempts', 'error');
       return null;
     }
+
+    await this.applyReferralIfNeeded().catch(() => {});
+    await this.completeProfile().catch(() => {});
     
-    const cardsAnswered = await this.processDeck().catch((e) => {
+    await this.processWellnessLogging().catch(() => {});
+    await this.processPulse().catch(() => {});
+    await this.processDailyQuiz().catch(() => {});
+    await this.processDeck().catch((e) => {
       if (e.message === 'AUTH_EXPIRED') {
-        log('Token expired during deck, re-logging...', 'warning');
         return this.login(account.privateKey, true).then(() => this.processDeck()).catch(() => 0);
       }
-      log('Deck processing failed: ' + e.message, 'warning');
       return 0;
     });
     
-    const campaignsCompleted = await this.processCampaigns().catch((e) => {
-      if (e.message === 'AUTH_EXPIRED') {
-        log('Token expired during campaigns, re-logging...', 'warning');
-        return this.login(account.privateKey, true).then(() => this.processCampaigns()).catch(() => 0);
-      }
-      log('Campaigns failed: ' + e.message, 'warning');
-      return 0;
-    });
+    await this.processAllMissions().catch(() => {});
+    await this.processDailyCheckin().catch(() => {});
+    await this.processPulseReveal().catch(() => {});
+    await this.processReferral().catch(() => {});
     
-    const badgesClaimed = await this.processBadges().catch((e) => {
-      if (e.message === 'AUTH_EXPIRED') {
-        log('Token expired during badges, re-logging...', 'warning');
-        return this.login(account.privateKey, true).then(() => this.processBadges()).catch(() => 0);
-      }
-      log('Badges failed: ' + e.message, 'warning');
-      return 0;
-    });
+    await this.processAgents().catch(() => {});
+    await this.processCampaigns().catch(() => {});
+    await this.processBadges().catch(() => {});
     
-    await this.processWellness().catch((e) => {
-      if (e.message === 'AUTH_EXPIRED') {
-        log('Token expired during wellness, re-logging...', 'warning');
-        return this.login(account.privateKey, true).then(() => this.processWellness()).catch(() => {});
-      }
-      if (!e.message.includes('SERVER_ERROR') && !e.message.includes('GATEWAY_ERROR')) {
-        log('Wellness failed: ' + e.message, 'warning');
-      }
-    });
-    
-    await this.processAgents().catch((e) => {
-      if (e.message === 'AUTH_EXPIRED') {
-        log('Token expired during agents, re-logging...', 'warning');
-        return this.login(account.privateKey, true).then(() => this.processAgents()).catch(() => 0);
-      }
-      log('Agents failed: ' + e.message, 'warning');
-      return 0;
-    });
-    
-    await this.processStaking().catch((e) => {
-      if (e.message === 'AUTH_EXPIRED') {
-        log('Token expired during staking, re-logging...', 'warning');
-        return this.login(account.privateKey, true).then(() => this.processStaking()).catch(() => {});
-      }
-      log('Staking failed: ' + e.message, 'warning');
-    });
-    
-    await this.logWater(250).catch(() => {});
-    await this.logExercise(0).catch(() => {});
-    await this.logSleep(0).catch(() => {});
-    await this.logMeal().catch(() => {});
-    await this.logMeditation(0).catch(() => {});
-    await this.logMood().catch(() => {});
-    await this.triageChat().catch(() => {});
-    
+    await this.processStaking().catch(() => {});
+    await this.trackRank().catch(() => {});
     await this.fetchDeck().catch(() => {});
     
     const result = {
@@ -1794,6 +2022,16 @@ class SaviorOfHealthBot {
       stakesLost: this.dailyStats.stakesLost,
       agentChats: this.dailyStats.agentChats,
       agentRewards: this.dailyStats.agentRewards,
+      dailyCheckinClaimed: this.dailyStats.dailyCheckinClaimed,
+      quizCompleted: this.dailyStats.quizCompleted,
+      pulseAnswered: this.dailyStats.pulseAnswered,
+      profileCompleted: this.dailyStats.profileCompleted,
+      referralGenerated: this.dailyStats.referralGenerated,
+      missionsClaimed: this.dailyStats.missionsClaimed,
+      missionsReward: this.dailyStats.missionsReward,
+      rank: this.rank ? this.rank.current.name : null,
+      referralLink: this.referralLink,
+      referralBonus: this._referralBonus,
     };
     
     logBanner('Account Complete!');
@@ -1810,9 +2048,16 @@ class SaviorOfHealthBot {
     if (this.dailyStats.aiAnswers > 0) {
       log('AI: ' + this.dailyStats.aiAnswers + ' answers', 'info');
     }
+    log('Daily Check-in: ' + (this.dailyStats.dailyCheckinClaimed ? '✅' : '❌'), 'checkin');
+    log('Quiz: ' + (this.dailyStats.quizCompleted ? '✅' : '❌'), 'quiz');
+    log('Pulse: ' + (this.dailyStats.pulseAnswered ? '✅' : '❌'), 'pulse');
+    log('Profile: ' + (this.dailyStats.profileCompleted ? '✅' : '❌'), 'profile');
+    log('Missions: ' + this.dailyStats.missionsClaimed + ' (' + this.dailyStats.missionsReward + ' HP)', 'mission');
+    if (this.rank) {
+      log('Rank: ' + this.rank.current.name, 'rank');
+    }
     
     this.dailyStats.totalHP += this.balance;
-    
     return result;
   }
 
@@ -1838,6 +2083,13 @@ class SaviorOfHealthBot {
       aiAttempts: 0,
       agentChats: 0,
       agentRewards: 0,
+      dailyCheckins: 0,
+      quizzesCompleted: 0,
+      pulsesAnswered: 0,
+      profilesCompleted: 0,
+      referralsGenerated: 0,
+      missionsClaimed: 0,
+      missionsReward: 0,
     };
     
     while (true) {
@@ -1872,6 +2124,13 @@ class SaviorOfHealthBot {
         aiAttempts: 0,
         agentChats: 0,
         agentRewards: 0,
+        dailyCheckins: 0,
+        quizzesCompleted: 0,
+        pulsesAnswered: 0,
+        profilesCompleted: 0,
+        referralsGenerated: 0,
+        missionsClaimed: 0,
+        missionsReward: 0,
       };
       
       for (let i = 0; i < accounts.length; i++) {
@@ -1903,6 +2162,13 @@ class SaviorOfHealthBot {
           runStats.aiAttempts += result.aiAttempts || 0;
           runStats.agentChats += result.agentChats || 0;
           runStats.agentRewards += result.agentRewards || 0;
+          runStats.dailyCheckins += result.dailyCheckinClaimed ? 1 : 0;
+          runStats.quizzesCompleted += result.quizCompleted ? 1 : 0;
+          runStats.pulsesAnswered += result.pulseAnswered ? 1 : 0;
+          runStats.profilesCompleted += result.profileCompleted ? 1 : 0;
+          runStats.referralsGenerated += result.referralGenerated ? 1 : 0;
+          runStats.missionsClaimed += result.missionsClaimed || 0;
+          runStats.missionsReward += result.missionsReward || 0;
           
           grandTotal.accountsProcessed++;
           grandTotal.totalHP += result.balance || 0;
@@ -1924,6 +2190,13 @@ class SaviorOfHealthBot {
           grandTotal.aiAttempts += result.aiAttempts || 0;
           grandTotal.agentChats += result.agentChats || 0;
           grandTotal.agentRewards += result.agentRewards || 0;
+          grandTotal.dailyCheckins += result.dailyCheckinClaimed ? 1 : 0;
+          grandTotal.quizzesCompleted += result.quizCompleted ? 1 : 0;
+          grandTotal.pulsesAnswered += result.pulseAnswered ? 1 : 0;
+          grandTotal.profilesCompleted += result.profileCompleted ? 1 : 0;
+          grandTotal.referralsGenerated += result.referralGenerated ? 1 : 0;
+          grandTotal.missionsClaimed += result.missionsClaimed || 0;
+          grandTotal.missionsReward += result.missionsReward || 0;
           
           saveResults({
             timestamp: new Date().toISOString(),
@@ -1961,6 +2234,15 @@ class SaviorOfHealthBot {
       if (runStats.aiAnswers > 0) {
         log('AI answers: ' + runStats.aiAnswers + ' (' + runStats.aiAttempts + ' attempts)', 'info');
       }
+      
+      logBanner('HEALDROP SUMMARY');
+      log('Daily Check-ins: ' + runStats.dailyCheckins, 'checkin');
+      log('Quizzes completed: ' + runStats.quizzesCompleted, 'quiz');
+      log('Pulses answered: ' + runStats.pulsesAnswered, 'pulse');
+      log('Profiles completed: ' + runStats.profilesCompleted, 'profile');
+      log('Referrals generated: ' + runStats.referralsGenerated, 'referral');
+      log('Missions claimed: ' + runStats.missionsClaimed + ' (' + runStats.missionsReward + ' HP)', 'mission');
+      
       log('Proxy: ' + (this.useProxy ? 'Enabled' : 'Disabled'), 'proxy');
       
       if (allResults.length > 0) {
@@ -1969,7 +2251,7 @@ class SaviorOfHealthBot {
           const shortAddr = result.address ? 
             result.address.substring(0, 8) + '...' + result.address.substring(result.address.length - 6) : 
             'unknown';
-          log('  ' + shortAddr + ': ' + formatNumber(result.balance) + ' HP (Cards: ' + (result.cardsAnswered || 0) + ', Campaigns: ' + (result.campaignsCompleted || 0) + ', Agent Chats: ' + (result.agentChats || 0) + ')', 'info');
+          log('  ' + shortAddr + ': ' + formatNumber(result.balance) + ' HP (Cards: ' + (result.cardsAnswered || 0) + ', Campaigns: ' + (result.campaignsCompleted || 0) + ', Agent Chats: ' + (result.agentChats || 0) + ', Rank: ' + (result.rank || 'N/A') + ')', 'info');
         }
       }
       

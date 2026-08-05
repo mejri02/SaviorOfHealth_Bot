@@ -1,5 +1,5 @@
 {
-  "claimBadges": true,
+  "claimBadges": false,
   "minBnbBalance": 0.0005,
   "processDeck": true,
   "processCampaigns": true,
@@ -8,6 +8,12 @@
   "processMindspace": true,
   "processTriage": true,
   "processAgents": true,
+  "processDailyCheckin": true,
+  "processDailyQuiz": true,
+  "processPulse": true,
+  "processReferral": true,
+  "completeProfile": true,
+  "processMissions": true,
   "stakeGoals": true,
   "stakeAmount": 10,
   "autoStake": true,
@@ -16,11 +22,7 @@
   "delayBetweenAccounts": 5000,
   "delayBetweenRequests": 2000,
   "groqTimeout": 10000,
-  "groqModels": [
-    "llama-3.1-8b-instant",
-    "gemma2-9b-it",
-    "mixtral-8x7b-32768"
-  ],
+  "groqModels": ["llama-3.1-8b-instant", "gemma2-9b-it", "mixtral-8x7b-32768"],
   "bscRpc": "https://bsc-dataseed.binance.org/",
   "badgeContract": "0xe0ad72abadf8ea43dd2e168bd97a24f8a04ada91",
   "chainId": 56,
