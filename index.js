@@ -16,7 +16,8 @@ const RESULTS_FILE = path.join(BASE_DIR, 'results.json');
 
 function loadConfig() {
   const defaultConfig = {
-    claimBadges: false,
+    claimBadges: true,
+    syncBadges: true, // Auto-sync already claimed on-chain badges
     minBnbBalance: 0.0005,
     processDeck: true,
     processCampaigns: true,
@@ -104,7 +105,6 @@ function log(message, type = 'info', data = null) {
     sleep: { color: COLORS.brightBlue, icon: '💤' },
     groq: { color: COLORS.brightCyan, icon: '🧠' },
     rotate: { color: COLORS.brightYellow, icon: '🔄' },
-    config: { color: COLORS.brightWhite, icon: '⚙️' },
     proxy: { color: COLORS.brightYellow, icon: '🔌' },
     wellness: { color: COLORS.brightGreen, icon: '💪' },
     nutrition: { color: COLORS.brightYellow, icon: '🍎' },
@@ -122,6 +122,8 @@ function log(message, type = 'info', data = null) {
     profile: { color: COLORS.brightBlue, icon: '👤' },
     rank: { color: COLORS.brightYellow, icon: '🏆' },
     mission: { color: COLORS.brightGreen, icon: '🎯' },
+    mint: { color: COLORS.brightMagenta, icon: '🔮' },
+    sync: { color: COLORS.brightCyan, icon: '🔄' },
   };
   const style = styles[type] || styles.info;
   const prefix = `${style.color}${style.icon}${COLORS.reset}`;
@@ -677,6 +679,7 @@ class BadgeClaimer {
     this.wallet = null;
     this.provider = null;
     this.contract = null;
+    this.contractAddress = CONFIG.badgeContract || '0xe0ad72abadf8ea43dd2e168bd97a24f8a04ada91';
   }
 
   async init() {
@@ -701,7 +704,7 @@ class BadgeClaimer {
         'function claim(string badgeKey, bytes signature) external',
         'function hasClaimed(address wallet, string badgeKey) view returns (bool)'
       ];
-      this.contract = new ethers.Contract(CONFIG.badgeContract, abi, this.wallet);
+      this.contract = new ethers.Contract(this.contractAddress, abi, this.wallet);
       
       return true;
     } catch (error) {
@@ -711,27 +714,38 @@ class BadgeClaimer {
   }
 
   async getBalance() {
-    return await this.provider.getBalance(this.wallet.address);
+    try {
+      return await this.provider.getBalance(this.wallet.address);
+    } catch (error) {
+      return 0n;
+    }
+  }
+
+  async hasClaimedOnChain(badgeKey) {
+    try {
+      return await this.contract.hasClaimed(this.wallet.address, badgeKey);
+    } catch (e) {
+      return false;
+    }
   }
 
   async claimBadge(badgeKey, signature) {
     try {
-      const gasPrice = await this.provider.getFeeData();
+      const feeData = await this.provider.getFeeData();
+      const gasPrice = feeData.gasPrice || 5000000000n;
+      
       const tx = await this.contract.claim(badgeKey, signature, {
-        gasLimit: 300000,
-        gasPrice: gasPrice.gasPrice,
+        gasLimit: 500000,
+        gasPrice: gasPrice,
       });
       
-      log('  Transaction sent: ' + tx.hash.substring(0, 20) + '...', 'debug');
-      const receipt = await tx.wait(1);
+      const receipt = await tx.wait(2);
       
       if (receipt.status === 1) {
-        log('  Badge claimed on-chain!', 'success');
         return receipt.transactionHash;
       }
       return null;
     } catch (error) {
-      log('  Claim failed: ' + error.message, 'error');
       return null;
     }
   }
@@ -768,6 +782,7 @@ class SaviorOfHealthBot {
       totalCardsAnswered: 0,
       totalCampaignsCompleted: 0,
       badgesClaimed: 0,
+      badgesSynced: 0,
       aiAnswers: 0,
       aiAttempts: 0,
       wellnessGoalsCompleted: 0,
@@ -1172,9 +1187,11 @@ class SaviorOfHealthBot {
     return completed;
   }
 
+  // ==================== BADGE SYNC & MINT ====================
+
   async fetchBadges() {
     try {
-      const data = await this.apiClient.requestWithRetry('/api/badges/sbt', { method: 'GET' });
+      const data = await this.apiClient.requestWithRetry('/api/badges', { method: 'GET' });
       this.badges = data.badges || [];
       return data;
     } catch (error) {
@@ -1184,62 +1201,181 @@ class SaviorOfHealthBot {
     }
   }
 
+  async getBadgeTxHashFromEvents(badgeKey) {
+    try {
+      const provider = new ethers.JsonRpcProvider(CONFIG.bscRpc);
+      const contract = new ethers.Contract(
+        CONFIG.badgeContract,
+        ['event Claimed(address indexed wallet, string badgeKey, uint256 reward, uint256 timestamp)'],
+        provider
+      );
+      const currentBlock = await provider.getBlockNumber();
+      const fromBlock = currentBlock - 50000;
+      const filter = contract.filters.Claimed(this.address, badgeKey);
+      const events = await contract.queryFilter(filter, fromBlock, currentBlock);
+      if (events.length > 0) {
+        return events[events.length - 1].transactionHash;
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async syncBadgeToServer(badgeKey, txHash) {
+    try {
+      const result = await this.apiClient.requestWithRetry('/api/badges/sbt/confirm', {
+        method: 'POST',
+        body: JSON.stringify({ badgeKey, txHash })
+      });
+      return result && result.ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
   async processBadges() {
-    if (!CONFIG.claimBadges) {
-      log('Badge claiming disabled', 'warning');
+    const shouldMint = CONFIG.claimBadges === true;
+    const shouldSync = CONFIG.syncBadges === true;
+
+    if (!shouldMint && !shouldSync) {
+      log('Badge processing disabled (claimBadges=false, syncBadges=false)', 'warning');
       return 0;
     }
 
-    logBanner('Checking Badges');
+    logBanner('Processing Badges');
     
     await this.fetchBadges();
     
-    const claimable = this.badges.filter(badge => badge.earned && !badge.claimed);
+    if (!this.badges || this.badges.length === 0) {
+      log('No badges data available', 'warning');
+      return 0;
+    }
+
+    // Find badges that need attention: earned but not claimed in API
+    const toProcess = this.badges.filter(badge => badge.earned === true && badge.claimed === false);
     
-    if (claimable.length === 0) {
-      log('No claimable badges', 'info');
+    if (toProcess.length === 0) {
+      log('All earned badges are already synced with API', 'info');
       return 0;
     }
     
-    let claimed = 0;
+    log('Found ' + toProcess.length + ' badges to process (mint/sync)', 'info');
     
-    for (const badge of claimable) {
-      log('  ' + badge.name + ' (' + badge.tier + ')', 'info');
+    const badgeClaimer = new BadgeClaimer(this.privateKey, this.proxyManager);
+    if (!await badgeClaimer.init()) {
+      log('❌ Failed to initialize wallet for badge processing', 'error');
+      return 0;
+    }
+    
+    let minted = 0;
+    let synced = 0;
+    let totalReward = 0;
+    
+    for (const badge of toProcess) {
+      log('  🏅 ' + badge.name + ' (+' + badge.reward + ' HP)', 'badge');
       
+      // Check on-chain status
+      let onChainClaimed = false;
       try {
-        const signatureData = await this.apiClient.requestWithRetry('/api/badges/sbt', {
-          method: 'POST',
-          body: JSON.stringify({ badgeKey: badge.key })
-        });
-        
-        if (signatureData && signatureData.signature) {
-          const badgeClaimer = new BadgeClaimer(this.privateKey, this.proxyManager);
-          if (await badgeClaimer.init()) {
-            const txHash = await badgeClaimer.claimBadge(badge.key, signatureData.signature);
-            if (txHash) {
-              await this.apiClient.requestWithRetry('/api/badges/sbt/confirm', {
-                method: 'POST',
-                body: JSON.stringify({ badgeKey: badge.key, txHash })
-              });
-              claimed++;
-              this.dailyStats.badgesClaimed++;
-              log('    ' + badge.name + ' claimed!', 'success');
-            }
-          }
-          await sleep(randomDelay(1000, 2000));
-        }
-      } catch (error) {
-        if (error.message === 'AUTH_EXPIRED') throw error;
-        log('  Failed to get signature for ' + badge.name + ': ' + error.message, 'error');
+        onChainClaimed = await badgeClaimer.hasClaimedOnChain(badge.key);
+      } catch (e) {
+        log('    ⚠️ Could not check on-chain: ' + e.message, 'warning');
       }
+      
+      if (onChainClaimed) {
+        log('    🔄 Already claimed on-chain', 'sync');
+        
+        if (shouldSync) {
+          // Try to get transaction hash from events
+          let txHash = await this.getBadgeTxHashFromEvents(badge.key);
+          if (!txHash) {
+            log('    ⚠️ No tx hash found in events, cannot sync', 'warning');
+            continue;
+          }
+          
+          log('    🔄 Syncing with tx: ' + txHash.substring(0, 20) + '...', 'sync');
+          const ok = await this.syncBadgeToServer(badge.key, txHash);
+          if (ok) {
+            synced++;
+            totalReward += badge.reward || 0;
+            this.dailyStats.badgesSynced++;
+            this.totalEarned += badge.reward || 0;
+            log('    ✅ ' + badge.name + ' synced! +' + badge.reward + ' HP', 'success');
+          } else {
+            log('    ⚠️ Failed to sync ' + badge.name, 'warning');
+          }
+        } else {
+          log('    ℹ️ Sync disabled, skipping', 'info');
+        }
+      } else {
+        log('    📝 Not claimed on-chain yet', 'info');
+        
+        if (shouldMint) {
+          // Check BNB balance
+          const balance = await badgeClaimer.getBalance();
+          const minBnb = ethers.parseEther(CONFIG.minBnbBalance.toString());
+          if (balance < minBnb) {
+            const bnbStr = ethers.formatEther(balance);
+            log('    ⚠️ Insufficient BNB. Need ' + CONFIG.minBnbBalance + ' BNB (have ' + bnbStr + ' BNB)', 'warning');
+            continue;
+          }
+          
+          // Get signature
+          log('    Getting mint signature...', 'debug');
+          const sigData = await this.apiClient.requestWithRetry('/api/badges/sbt', {
+            method: 'POST',
+            body: JSON.stringify({ badgeKey: badge.key })
+          });
+          
+          if (!sigData || !sigData.signature) {
+            log('    ❌ No signature received', 'error');
+            continue;
+          }
+          
+          log('    Minting on-chain...', 'mint');
+          const txHash = await badgeClaimer.claimBadge(badge.key, sigData.signature);
+          
+          if (txHash) {
+            // Confirm with server
+            const confirmOk = await this.syncBadgeToServer(badge.key, txHash);
+            if (confirmOk) {
+              minted++;
+              totalReward += badge.reward || 0;
+              this.dailyStats.badgesClaimed++;
+              this.totalEarned += badge.reward || 0;
+              log('    ✅ ' + badge.name + ' minted! +' + badge.reward + ' HP', 'success');
+            } else {
+              log('    ⚠️ Minted but failed to confirm with API', 'warning');
+            }
+          } else {
+            log('    ❌ Mint transaction failed', 'error');
+          }
+        } else {
+          log('    ℹ️ Minting disabled, skipping', 'info');
+        }
+      }
+      
+      await sleep(randomDelay(500, 1000));
     }
     
-    if (claimed > 0) {
-      log('Claimed ' + claimed + ' badges', 'success');
+    // Refresh balance
+    if (minted > 0 || synced > 0) {
+      try {
+        const me = await this.apiClient.request('/api/auth/me', { method: 'GET' });
+        if (me && me.user) {
+          this.balance = me.user.tokenBalance || this.balance;
+        }
+      } catch (e) {}
+      log('Minted: ' + minted + ', Synced: ' + synced + ' (' + totalReward + ' HP)', 'success');
+    } else {
+      log('No badges were minted or synced', 'info');
     }
     
-    return claimed;
+    return minted + synced;
   }
+
+  // ==================== OTHER METHODS (unchanged) ====================
 
   async fetchGoals() {
     try {
@@ -1991,9 +2127,13 @@ class SaviorOfHealthBot {
     await this.processPulseReveal().catch(() => {});
     await this.processReferral().catch(() => {});
     
+    // Process badges (mint/sync)
+    await this.processBadges().catch((e) => {
+      log('Badge processing error: ' + e.message, 'error');
+    });
+    
     await this.processAgents().catch(() => {});
     await this.processCampaigns().catch(() => {});
-    await this.processBadges().catch(() => {});
     
     await this.processStaking().catch(() => {});
     await this.trackRank().catch(() => {});
@@ -2006,6 +2146,7 @@ class SaviorOfHealthBot {
       cardsAnswered: this.dailyStats.totalCardsAnswered,
       campaignsCompleted: this.dailyStats.totalCampaignsCompleted,
       badgesClaimed: this.dailyStats.badgesClaimed,
+      badgesSynced: this.dailyStats.badgesSynced,
       totalEarned: this.totalEarned,
       aiAnswers: this.dailyStats.aiAnswers,
       aiAttempts: this.dailyStats.aiAttempts,
@@ -2039,7 +2180,8 @@ class SaviorOfHealthBot {
     log('Earned: ' + formatNumber(this.totalEarned) + ' HP', 'success');
     log('Cards: ' + this.dailyStats.totalCardsAnswered, 'info');
     log('Campaigns: ' + this.dailyStats.totalCampaignsCompleted, 'info');
-    log('Badges: ' + this.dailyStats.badgesClaimed, 'badge');
+    log('Badges Minted: ' + this.dailyStats.badgesClaimed, 'badge');
+    log('Badges Synced: ' + this.dailyStats.badgesSynced, 'sync');
     log('Wellness: ' + this.dailyStats.wellnessGoalsCompleted, 'wellness');
     log('Water: ' + this.dailyStats.waterMl + 'ml', 'water');
     log('Mood: ' + (this.dailyStats.moodLogged ? 'Yes' : 'No'), 'mood');
@@ -2068,6 +2210,7 @@ class SaviorOfHealthBot {
       totalCardsAnswered: 0,
       totalCampaignsCompleted: 0,
       badgesClaimed: 0,
+      badgesSynced: 0,
       wellnessGoalsCompleted: 0,
       mealsLogged: 0,
       exerciseMinutes: 0,
@@ -2109,6 +2252,7 @@ class SaviorOfHealthBot {
         totalCardsAnswered: 0,
         totalCampaignsCompleted: 0,
         badgesClaimed: 0,
+        badgesSynced: 0,
         wellnessGoalsCompleted: 0,
         mealsLogged: 0,
         exerciseMinutes: 0,
@@ -2147,6 +2291,7 @@ class SaviorOfHealthBot {
           runStats.totalCardsAnswered += result.cardsAnswered || 0;
           runStats.totalCampaignsCompleted += result.campaignsCompleted || 0;
           runStats.badgesClaimed += result.badgesClaimed || 0;
+          runStats.badgesSynced += result.badgesSynced || 0;
           runStats.wellnessGoalsCompleted += result.wellnessGoalsCompleted || 0;
           runStats.mealsLogged += result.mealsLogged || 0;
           runStats.exerciseMinutes += result.exerciseMinutes || 0;
@@ -2175,6 +2320,7 @@ class SaviorOfHealthBot {
           grandTotal.totalCardsAnswered += result.cardsAnswered || 0;
           grandTotal.totalCampaignsCompleted += result.campaignsCompleted || 0;
           grandTotal.badgesClaimed += result.badgesClaimed || 0;
+          grandTotal.badgesSynced += result.badgesSynced || 0;
           grandTotal.wellnessGoalsCompleted += result.wellnessGoalsCompleted || 0;
           grandTotal.mealsLogged += result.mealsLogged || 0;
           grandTotal.exerciseMinutes += result.exerciseMinutes || 0;
@@ -2220,7 +2366,8 @@ class SaviorOfHealthBot {
       log('Total HP: ' + formatNumber(runStats.totalHP), 'coin');
       log('Cards answered: ' + runStats.totalCardsAnswered, 'info');
       log('Campaigns completed: ' + runStats.totalCampaignsCompleted, 'info');
-      log('Badges claimed: ' + runStats.badgesClaimed, 'badge');
+      log('Badges Minted: ' + runStats.badgesClaimed, 'badge');
+      log('Badges Synced: ' + runStats.badgesSynced, 'sync');
       log('Wellness goals: ' + runStats.wellnessGoalsCompleted, 'wellness');
       log('Meals logged: ' + runStats.mealsLogged, 'nutrition');
       log('Exercise minutes: ' + runStats.exerciseMinutes, 'wellness');
