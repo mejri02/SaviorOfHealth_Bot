@@ -17,7 +17,7 @@ const RESULTS_FILE = path.join(BASE_DIR, 'results.json');
 function loadConfig() {
   const defaultConfig = {
     claimBadges: true,
-    syncBadges: true, // Auto-sync already claimed on-chain badges
+    syncBadges: true,
     minBnbBalance: 0.0005,
     processDeck: true,
     processCampaigns: true,
@@ -159,7 +159,7 @@ function getRandomUserAgent() {
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.1 Safari/605.1.15',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 Version/17.2 Mobile/15E148 Safari/604.1',
-    'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 Chrome/120.0.6099.230 Mobile Safari/537.36',
+    'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36',
   ];
   return agents[Math.floor(Math.random() * agents.length)];
 }
@@ -239,6 +239,7 @@ class ProxyManager {
   constructor() {
     this.proxies = [];
     this.currentIndex = 0;
+    this.assignedProxies = new Map();
     this.loadProxies();
   }
 
@@ -297,9 +298,15 @@ class ProxyManager {
     return null;
   }
 
-  getRandomProxy() {
+  getProxyForAccount(accountIndex) {
     if (this.proxies.length === 0) return null;
-    return this.proxies[Math.floor(Math.random() * this.proxies.length)];
+    if (this.assignedProxies.has(accountIndex)) {
+      return this.assignedProxies.get(accountIndex);
+    }
+    const proxyIndex = accountIndex % this.proxies.length;
+    const proxy = this.proxies[proxyIndex];
+    this.assignedProxies.set(accountIndex, proxy);
+    return proxy;
   }
 
   getAgent(proxy) {
@@ -440,7 +447,7 @@ class GroqManager {
         };
 
         if (proxyManager) {
-          const proxy = proxyManager.getRandomProxy();
+          const proxy = proxyManager.getProxyForAccount(0);
           if (proxy) {
             const agent = proxyManager.getAgent(proxy);
             if (agent) fetchOptions.agent = agent;
@@ -453,7 +460,7 @@ class GroqManager {
         if (response.status === 429) {
           this.markKeyRateLimited(key);
           this.rotateModel();
-          await sleep(2000);
+          await sleep(5000 + Math.random() * 3000);
           continue;
         }
 
@@ -523,14 +530,15 @@ class GroqManager {
 }
 
 class ApiClient {
-  constructor(proxyManager = null) {
+  constructor(proxyManager = null, accountProxy = null) {
     this.proxyManager = proxyManager;
+    this.accountProxy = accountProxy;
     this.token = null;
     this.tokenExpiry = null;
     this.userAgent = getRandomUserAgent();
     this.requestCount = 0;
     this.lastRequestTime = 0;
-    this.maxRequestsPerSecond = 5;
+    this.maxRequestsPerSecond = 3;
   }
 
   setToken(token) {
@@ -550,7 +558,7 @@ class ApiClient {
     this.requestCount++;
     const now = Date.now();
     if (this.requestCount > this.maxRequestsPerSecond && now - this.lastRequestTime < 1000) {
-      await sleep(randomDelay(500, 1500));
+      await sleep(randomDelay(800, 1600));
     }
     this.lastRequestTime = now;
 
@@ -571,12 +579,9 @@ class ApiClient {
       headers,
     };
 
-    if (this.proxyManager) {
-      const proxy = this.proxyManager.getRandomProxy();
-      if (proxy) {
-        const agent = this.proxyManager.getAgent(proxy);
-        if (agent) fetchOptions.agent = agent;
-      }
+    if (this.accountProxy) {
+      const agent = this.proxyManager.getAgent(this.accountProxy);
+      if (agent) fetchOptions.agent = agent;
     }
 
     const controller = new AbortController();
@@ -591,6 +596,10 @@ class ApiClient {
 
       if (response.status === 401) {
         throw new Error('AUTH_EXPIRED');
+      }
+
+      if (response.status === 429) {
+        throw new Error('RATE_LIMITED');
       }
 
       if (response.status === 504 || response.status === 502 || response.status === 503) {
@@ -627,13 +636,14 @@ class ApiClient {
         throw new Error(data.error && data.error.message ? data.error.message : data.message || 'HTTP ' + response.status);
       }
 
-      await sleep(randomDelay(200, 600));
+      await sleep(randomDelay(300, 700));
       return data;
 
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       if (error.message === 'GATEWAY_ERROR') throw error;
       if (error.message === 'SERVER_ERROR') throw error;
+      if (error.message === 'RATE_LIMITED') throw error;
       throw error;
     } finally {
       clearTimeout(timeoutId);
@@ -655,13 +665,20 @@ class ApiClient {
           throw error;
         }
         
+        if (error.message === 'RATE_LIMITED') {
+          const delay = retryDelay * Math.pow(2, attempt - 1) + Math.random() * 2000;
+          log('Rate limited, waiting ' + Math.round(delay/1000) + 's...', 'warning');
+          await sleep(delay);
+          continue;
+        }
+        
         if ((error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') && CONFIG.skipOnServerError) {
           log('Server/gateway error, skipping this request', 'skip');
           return null;
         }
         
         if (attempt < maxRetries) {
-          const delay = retryDelay * Math.pow(1.5, attempt - 1);
+          const delay = retryDelay * Math.pow(1.5, attempt - 1) + Math.random() * 1000;
           log('Retry ' + attempt + '/' + maxRetries + ' for ' + endpoint + ' in ' + Math.round(delay/1000) + 's...', 'warning');
           await sleep(delay);
         }
@@ -688,7 +705,7 @@ class BadgeClaimer {
       
       let providerOptions = {};
       if (this.proxyManager) {
-        const proxy = this.proxyManager.getRandomProxy();
+        const proxy = this.proxyManager.getProxyForAccount(0);
         if (proxy) {
           const agent = this.proxyManager.getAgent(proxy);
           if (agent) {
@@ -752,9 +769,17 @@ class BadgeClaimer {
 }
 
 class SaviorOfHealthBot {
-  constructor(useProxy = false) {
+  constructor(useProxy = false, accountIndex = 0) {
+    this.accountIndex = accountIndex;
     this.proxyManager = useProxy ? new ProxyManager() : null;
-    this.apiClient = new ApiClient(this.proxyManager);
+    this.accountProxy = null;
+    if (this.proxyManager) {
+      this.accountProxy = this.proxyManager.getProxyForAccount(accountIndex);
+      if (this.accountProxy) {
+        log('Account ' + accountIndex + ' assigned proxy: ' + this.accountProxy.host + ':' + this.accountProxy.port, 'proxy');
+      }
+    }
+    this.apiClient = new ApiClient(this.proxyManager, this.accountProxy);
     this.groq = new GroqManager();
     this.wallet = null;
     this.provider = null;
@@ -928,6 +953,14 @@ class SaviorOfHealthBot {
     } catch (error) {
       if (error.message === 'AUTH_EXPIRED') throw error;
       
+      if (error.message === 'RATE_LIMITED') {
+        log('  Rate limited, waiting longer...', 'warning');
+        await sleep(10000 + Math.random() * 5000);
+        const card = this.cards.find(c => c.id === cardId);
+        if (card) card.answered = true;
+        return { ok: true, reward: 0, skipped: true };
+      }
+      
       if ((error.message === 'SERVER_ERROR' || error.message === 'GATEWAY_ERROR') && CONFIG.skipOnServerError) {
         log('  Server/gateway error, skipping this card', 'skip');
         const card = this.cards.find(c => c.id === cardId);
@@ -1039,7 +1072,7 @@ class SaviorOfHealthBot {
         }
       }
       
-      await sleep(randomDelay(2000, 4000));
+      await sleep(randomDelay(3000, 6000));
     }
     
     if (cardCount > 0) {
@@ -1156,7 +1189,7 @@ class SaviorOfHealthBot {
           }
           
           currentAsk = response && response.ask ? response.ask : null;
-          await sleep(randomDelay(500, 1500));
+          await sleep(randomDelay(800, 2000));
         }
         
         completed++;
@@ -1177,7 +1210,7 @@ class SaviorOfHealthBot {
         }
       }
       
-      await sleep(randomDelay(2000, 4000));
+      await sleep(randomDelay(3000, 5000));
     }
     
     if (completed > 0) {
@@ -1186,8 +1219,6 @@ class SaviorOfHealthBot {
     
     return completed;
   }
-
-  // ==================== BADGE SYNC & MINT ====================
 
   async fetchBadges() {
     try {
@@ -1252,7 +1283,6 @@ class SaviorOfHealthBot {
       return 0;
     }
 
-    // Find badges that need attention: earned but not claimed in API
     const toProcess = this.badges.filter(badge => badge.earned === true && badge.claimed === false);
     
     if (toProcess.length === 0) {
@@ -1264,7 +1294,7 @@ class SaviorOfHealthBot {
     
     const badgeClaimer = new BadgeClaimer(this.privateKey, this.proxyManager);
     if (!await badgeClaimer.init()) {
-      log('❌ Failed to initialize wallet for badge processing', 'error');
+      log('Failed to initialize wallet for badge processing', 'error');
       return 0;
     }
     
@@ -1275,53 +1305,49 @@ class SaviorOfHealthBot {
     for (const badge of toProcess) {
       log('  🏅 ' + badge.name + ' (+' + badge.reward + ' HP)', 'badge');
       
-      // Check on-chain status
       let onChainClaimed = false;
       try {
         onChainClaimed = await badgeClaimer.hasClaimedOnChain(badge.key);
       } catch (e) {
-        log('    ⚠️ Could not check on-chain: ' + e.message, 'warning');
+        log('    Could not check on-chain: ' + e.message, 'warning');
       }
       
       if (onChainClaimed) {
-        log('    🔄 Already claimed on-chain', 'sync');
+        log('    Already claimed on-chain', 'sync');
         
         if (shouldSync) {
-          // Try to get transaction hash from events
           let txHash = await this.getBadgeTxHashFromEvents(badge.key);
           if (!txHash) {
-            log('    ⚠️ No tx hash found in events, cannot sync', 'warning');
+            log('    No tx hash found in events, cannot sync', 'warning');
             continue;
           }
           
-          log('    🔄 Syncing with tx: ' + txHash.substring(0, 20) + '...', 'sync');
+          log('    Syncing with tx: ' + txHash.substring(0, 20) + '...', 'sync');
           const ok = await this.syncBadgeToServer(badge.key, txHash);
           if (ok) {
             synced++;
             totalReward += badge.reward || 0;
             this.dailyStats.badgesSynced++;
             this.totalEarned += badge.reward || 0;
-            log('    ✅ ' + badge.name + ' synced! +' + badge.reward + ' HP', 'success');
+            log('    ' + badge.name + ' synced! +' + badge.reward + ' HP', 'success');
           } else {
-            log('    ⚠️ Failed to sync ' + badge.name, 'warning');
+            log('    Failed to sync ' + badge.name, 'warning');
           }
         } else {
-          log('    ℹ️ Sync disabled, skipping', 'info');
+          log('    Sync disabled, skipping', 'info');
         }
       } else {
-        log('    📝 Not claimed on-chain yet', 'info');
+        log('    Not claimed on-chain yet', 'info');
         
         if (shouldMint) {
-          // Check BNB balance
           const balance = await badgeClaimer.getBalance();
           const minBnb = ethers.parseEther(CONFIG.minBnbBalance.toString());
           if (balance < minBnb) {
             const bnbStr = ethers.formatEther(balance);
-            log('    ⚠️ Insufficient BNB. Need ' + CONFIG.minBnbBalance + ' BNB (have ' + bnbStr + ' BNB)', 'warning');
+            log('    Insufficient BNB. Need ' + CONFIG.minBnbBalance + ' BNB (have ' + bnbStr + ' BNB)', 'warning');
             continue;
           }
           
-          // Get signature
           log('    Getting mint signature...', 'debug');
           const sigData = await this.apiClient.requestWithRetry('/api/badges/sbt', {
             method: 'POST',
@@ -1329,7 +1355,7 @@ class SaviorOfHealthBot {
           });
           
           if (!sigData || !sigData.signature) {
-            log('    ❌ No signature received', 'error');
+            log('    No signature received', 'error');
             continue;
           }
           
@@ -1337,29 +1363,27 @@ class SaviorOfHealthBot {
           const txHash = await badgeClaimer.claimBadge(badge.key, sigData.signature);
           
           if (txHash) {
-            // Confirm with server
             const confirmOk = await this.syncBadgeToServer(badge.key, txHash);
             if (confirmOk) {
               minted++;
               totalReward += badge.reward || 0;
               this.dailyStats.badgesClaimed++;
               this.totalEarned += badge.reward || 0;
-              log('    ✅ ' + badge.name + ' minted! +' + badge.reward + ' HP', 'success');
+              log('    ' + badge.name + ' minted! +' + badge.reward + ' HP', 'success');
             } else {
-              log('    ⚠️ Minted but failed to confirm with API', 'warning');
+              log('    Minted but failed to confirm with API', 'warning');
             }
           } else {
-            log('    ❌ Mint transaction failed', 'error');
+            log('    Mint transaction failed', 'error');
           }
         } else {
-          log('    ℹ️ Minting disabled, skipping', 'info');
+          log('    Minting disabled, skipping', 'info');
         }
       }
       
-      await sleep(randomDelay(500, 1000));
+      await sleep(randomDelay(800, 1500));
     }
     
-    // Refresh balance
     if (minted > 0 || synced > 0) {
       try {
         const me = await this.apiClient.request('/api/auth/me', { method: 'GET' });
@@ -1374,8 +1398,6 @@ class SaviorOfHealthBot {
     
     return minted + synced;
   }
-
-  // ==================== OTHER METHODS (unchanged) ====================
 
   async fetchGoals() {
     try {
@@ -1809,7 +1831,7 @@ class SaviorOfHealthBot {
           if (error.message.includes('409')) {
           }
         }
-        await sleep(randomDelay(300, 800));
+        await sleep(randomDelay(500, 1200));
       }
       this.dailyStats.missionsClaimed = claimed;
       this.dailyStats.missionsReward = totalReward;
@@ -1874,7 +1896,7 @@ class SaviorOfHealthBot {
             }
           } catch (error) {
           }
-          await sleep(randomDelay(500, 1500));
+          await sleep(randomDelay(800, 2000));
         }
       }
       await this.fetchGoals();
@@ -1976,30 +1998,88 @@ class SaviorOfHealthBot {
     }
   }
 
-  async processAgents() {
-    if (!CONFIG.processAgents) {
-      log('AI Agent processing disabled', 'warning');
-      return 0;
-    }
-    logBanner('Processing AI Agents');
-    const agents = this.getAgentConfigs();
-    let totalReward = 0;
-    let successCount = 0;
-    for (const [type, config] of Object.entries(agents)) {
-      const question = config.questions[Math.floor(Math.random() * config.questions.length)];
-      log('  ' + config.icon + ' Talking to ' + config.name + ' (' + type + ')...', 'agent');
-      const result = await this.chatWithAgent(type, question);
-      if (result && result.reward && result.reward.awarded) {
-        totalReward += result.reward.amount || 0;
-        successCount++;
-      }
-      await sleep(randomDelay(1500, 3000));
-    }
-    if (successCount > 0) {
-      log('Completed ' + successCount + ' AI agent chats (' + totalReward + ' HP)', 'success');
-    }
-    return totalReward;
+async processAgents() {
+  if (!CONFIG.processAgents) {
+    log('AI Agent processing disabled', 'warning');
+    return 0;
   }
+  
+  logBanner('Processing AI Agents');
+  const agents = this.getAgentConfigs();
+  let totalReward = 0;
+  let successCount = 0;
+  
+  for (const [type, config] of Object.entries(agents)) {
+    const question = config.questions[Math.floor(Math.random() * config.questions.length)];
+    log('  ' + config.icon + ' Talking to ' + config.name + ' (' + type + ')...', 'agent');
+    
+    try {
+      const data = await this.apiClient.request('/api/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+          message: question,
+          agentType: type
+        })
+      });
+      
+      if (data && data.response) {
+        log('    ' + config.name + ': ' + data.response.substring(0, 60) + '...', 'debug');
+      }
+      
+      let rewardAmount = 0;
+      let rewardAwarded = false;
+      
+      if (data && data.reward) {
+        if (data.reward.awarded === true) {
+          rewardAwarded = true;
+          rewardAmount = data.reward.amount || 0;
+        } else if (data.reward.amount && data.reward.amount > 0) {
+          rewardAwarded = true;
+          rewardAmount = data.reward.amount;
+        }
+      }
+      
+      if (data && data.awarded && data.awarded > 0) {
+        rewardAwarded = true;
+        rewardAmount = data.awarded;
+      }
+      
+      if (rewardAwarded && rewardAmount > 0) {
+        this.balance = data.balance || this.balance;
+        this.totalEarned += rewardAmount;
+        this.dailyStats.agentRewards += rewardAmount;
+        totalReward += rewardAmount;
+        successCount++;
+        log('  ✅ +' + rewardAmount + ' HP from ' + type + ' chat', 'success');
+      } else if (data && data.already === true) {
+        log('  ⏭️ Already chatted with ' + type + ' today', 'skip');
+      } else {
+        log('  ⏭️ No reward from ' + type + ' (already done today)', 'skip');
+      }
+      
+      this.dailyStats.agentChats++;
+      
+    } catch (error) {
+      if (error.message.includes('409')) {
+        log('  ⏭️ Already chatted with ' + type + ' today', 'skip');
+      } else if (error.message === 'AUTH_EXPIRED') {
+        throw error;
+      } else {
+        log('  ❌ Failed to chat with ' + type + ': ' + error.message, 'error');
+      }
+    }
+    
+    await sleep(randomDelay(2000, 4000));
+  }
+  
+  if (successCount > 0) {
+    log('✅ Completed ' + successCount + ' AI agent chats (' + totalReward + ' HP)', 'success');
+  } else {
+    log('ℹ️ All agent chats already done today (0 HP)', 'info');
+  }
+  
+  return totalReward;
+}
 
   async fetchStakeGoals() {
     try {
@@ -2070,7 +2150,7 @@ class SaviorOfHealthBot {
         if (this.balance >= amount) {
           await this.placeStake(goal.key, amount, goal.label);
           staked++;
-          await sleep(randomDelay(500, 1000));
+          await sleep(randomDelay(800, 1500));
         } else {
           break;
         }
@@ -2100,7 +2180,7 @@ class SaviorOfHealthBot {
       }
       if (attempt < 3) {
         log('Login attempt ' + attempt + ' failed, retrying...', 'warning');
-        await sleep(2000);
+        await sleep(3000);
       }
     }
     
@@ -2127,7 +2207,6 @@ class SaviorOfHealthBot {
     await this.processPulseReveal().catch(() => {});
     await this.processReferral().catch(() => {});
     
-    // Process badges (mint/sync)
     await this.processBadges().catch((e) => {
       log('Badge processing error: ' + e.message, 'error');
     });
@@ -2277,10 +2356,29 @@ class SaviorOfHealthBot {
         missionsReward: 0,
       };
       
+      const proxyManager = new ProxyManager();
+      const accountProxyMap = new Map();
+      
+      for (let i = 0; i < accounts.length; i++) {
+        const proxy = proxyManager.getProxyForAccount(i);
+        accountProxyMap.set(i, proxy);
+        if (proxy) {
+          log('Account ' + (i + 1) + ' assigned proxy: ' + proxy.host + ':' + proxy.port, 'proxy');
+        } else {
+          log('Account ' + (i + 1) + ' has no proxy assigned', 'warning');
+        }
+      }
+      
       for (let i = 0; i < accounts.length; i++) {
         log('Processing ' + (i + 1) + '/' + accounts.length, 'highlight');
         
-        const bot = new SaviorOfHealthBot(this.useProxy);
+        const bot = new SaviorOfHealthBot(this.useProxy, i);
+        bot.accountProxy = accountProxyMap.get(i);
+        
+        if (bot.accountProxy) {
+          bot.apiClient.accountProxy = bot.accountProxy;
+        }
+        
         const result = await bot.processAccount(accounts[i]);
         
         if (result) {
@@ -2355,7 +2453,9 @@ class SaviorOfHealthBot {
         }
         
         if (i < accounts.length - 1) {
-          const waitTime = randomDelay(CONFIG.delayBetweenAccounts, CONFIG.delayBetweenAccounts + 3000);
+          const baseDelay = CONFIG.delayBetweenAccounts || 5000;
+          const jitter = Math.floor(Math.random() * 3000);
+          const waitTime = baseDelay + jitter;
           log('Waiting ' + Math.round(waitTime/1000) + 's before next account...', 'sleep');
           await sleep(waitTime);
         }
@@ -2427,9 +2527,36 @@ class SaviorOfHealthBot {
         }
         
         log('New day started!', 'success');
-        await sleep(randomDelay(1000, 5000));
+        await sleep(randomDelay(2000, 8000));
       }
     }
+  }
+}
+
+async function checkRobotsTxt() {
+  try {
+    const response = await fetch('https://saviorofhealth.app/robots.txt');
+    if (!response.ok) return;
+    const text = await response.text();
+    const disallowed = text.match(/Disallow:\s*(\/.*)/g) || [];
+    if (disallowed.some(d => d.includes('/api/'))) {
+      log('robots.txt disallows /api/ - proceed with caution', 'warning');
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      const answer = await new Promise(resolve => {
+        rl.question('Continue anyway? (y/n): ', answer => {
+          rl.close();
+          resolve(answer);
+        });
+      });
+      if (answer.toLowerCase() !== 'y') {
+        log('Exiting as per robots.txt', 'info');
+        process.exit(0);
+      }
+    }
+  } catch (e) {
   }
 }
 
@@ -2455,6 +2582,8 @@ function askQuestion(query) {
 }
 
 async function main() {
+  await checkRobotsTxt();
+  
   while (true) {
     showMenu();
     const choice = await askQuestion(COLORS.brightCyan + 'Enter your choice (1-3): ' + COLORS.reset);
