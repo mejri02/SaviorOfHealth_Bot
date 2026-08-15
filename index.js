@@ -599,6 +599,7 @@ class ApiClient {
       }
 
       if (response.status === 429) {
+        log('  ⚡ HTTP 429 - skipping immediately', 'warning');
         throw new Error('RATE_LIMITED');
       }
 
@@ -669,6 +670,11 @@ class ApiClient {
           const delay = retryDelay * Math.pow(2, attempt - 1) + Math.random() * 2000;
           log('Rate limited, waiting ' + Math.round(delay/1000) + 's...', 'warning');
           await sleep(delay);
+          // After 3 rate limits, skip this card
+          if (attempt >= 3) {
+            log('⚠️ Too many rate limits, skipping this card...', 'warning');
+            return { ok: true, reward: 0, skipped: true };
+          }
           continue;
         }
         
@@ -773,6 +779,8 @@ class SaviorOfHealthBot {
     this.accountIndex = accountIndex;
     this.proxyManager = useProxy ? new ProxyManager() : null;
     this.accountProxy = null;
+    this.answeredQuestions = new Set();
+    this._rateLimitedCards = new Set();
     if (this.proxyManager) {
       this.accountProxy = this.proxyManager.getProxyForAccount(accountIndex);
       if (this.accountProxy) {
@@ -924,6 +932,12 @@ class SaviorOfHealthBot {
     const payload = { surveyId: cardId, answer };
     if (crowdGuess !== null) payload.crowdGuess = crowdGuess;
     
+    // Skip if this card already had a rate limit
+    if (this._rateLimitedCards && this._rateLimitedCards.has(cardId)) {
+        log('  ⚡ Card already rate-limited, skipping...', 'warning');
+        return { ok: true, reward: 0, skipped: true };
+    }
+    
     try {
       const data = await this.apiClient.requestWithRetry('/api/earn/answer', {
         method: 'POST',
@@ -983,68 +997,69 @@ class SaviorOfHealthBot {
   }
 
   async processDeck() {
-    if (!CONFIG.processDeck) {
-      log('Deck processing disabled', 'warning');
-      return 0;
-    }
+  if (!CONFIG.processDeck) {
+    log('Deck processing disabled', 'warning');
+    return 0;
+  }
 
-    logBanner('Processing Daily Deck');
+  logBanner('Processing Daily Deck');
+  
+  let cardCount = 0;
+  let attempts = 0;
+  const maxAttempts = CONFIG.maxCardsPerDay || 10;
+  let consecutiveFailures = 0;
+  let serverErrorCount = 0;
+  
+  while (attempts < maxAttempts) {
+    attempts++;
+    await this.fetchDeck();
     
-    let cardCount = 0;
-    let attempts = 0;
-    const maxAttempts = CONFIG.maxCardsPerDay || 10;
-    let consecutiveFailures = 0;
-    let serverErrorCount = 0;
+    const unanswered = this.cards.filter(card => !card.answered);
+    if (unanswered.length === 0) break;
     
-    while (attempts < maxAttempts) {
-      attempts++;
-      await this.fetchDeck();
+    const card = unanswered[0];
+    cardCount++;
+    
+    const preview = card.question ? card.question.substring(0, 35) : 'Question';
+    log('' + cardCount + '/' + this.cards.length + ': ' + preview + '...', 'info');
+    
+    let answer = null;
+    let guess = null;
+    
+    if (CONFIG.useGroqAI && this.groq.apiKeys.length > 0) {
+      this.dailyStats.aiAttempts++;
       
-      const unanswered = this.cards.filter(card => !card.answered);
-      if (unanswered.length === 0) break;
-      
-      const card = unanswered[0];
-      cardCount++;
-      
-      const preview = card.question ? card.question.substring(0, 35) : 'Question';
-      log('' + cardCount + '/' + this.cards.length + ': ' + preview + '...', 'info');
-      
-      let answer = null;
-      let guess = null;
-      
-      if (CONFIG.useGroqAI && this.groq.apiKeys.length > 0) {
-        this.dailyStats.aiAttempts++;
-        
-        if (card.type === 'task') {
-          answer = 'done';
-        } else if (card.options && card.options.length > 0) {
-          answer = await this.groq.ask(card.question, card.options, this.proxyManager);
-          if (!answer) answer = card.options[Math.floor(Math.random() * card.options.length)];
-        } else {
-          answer = await this.groq.ask(card.question, null, this.proxyManager);
-          if (!answer) answer = 'I feel good today.';
-        }
-        
-        if (card.predict && answer) {
-          guess = Math.floor(25 + Math.random() * 50);
-        }
-        
-        this.dailyStats.aiAnswers++;
-        log('  Answer: ' + answer, 'debug');
-        if (guess) log('  Guess: ' + guess + '%', 'debug');
+      if (card.type === 'task') {
+        answer = 'done';
+      } else if (card.options && card.options.length > 0) {
+        answer = await this.groq.ask(card.question, card.options, this.proxyManager);
+        if (!answer) answer = card.options[Math.floor(Math.random() * card.options.length)];
       } else {
-        if (card.type === 'task') {
-          answer = 'done';
-        } else if (card.options && card.options.length > 0) {
-          answer = card.options[Math.floor(Math.random() * card.options.length)];
-        } else {
-          answer = 'I feel good today.';
-        }
-        if (card.predict) {
-          guess = Math.floor(25 + Math.random() * 50);
-        }
+        answer = await this.groq.ask(card.question, null, this.proxyManager);
+        if (!answer) answer = 'I feel good today.';
       }
       
+      if (card.predict && answer) {
+        guess = Math.floor(25 + Math.random() * 50);
+      }
+      
+      this.dailyStats.aiAnswers++;
+      log('  Answer: ' + answer, 'debug');
+      if (guess) log('  Guess: ' + guess + '%', 'debug');
+    } else {
+      if (card.type === 'task') {
+        answer = 'done';
+      } else if (card.options && card.options.length > 0) {
+        answer = card.options[Math.floor(Math.random() * card.options.length)];
+      } else {
+        answer = 'I feel good today.';
+      }
+      if (card.predict) {
+        guess = Math.floor(25 + Math.random() * 50);
+      }
+    }
+    
+    try {
       const result = await this.answerCard(card.id, answer, guess);
       
       if (result && result.ok !== false) {
@@ -1071,18 +1086,25 @@ class SaviorOfHealthBot {
           break;
         }
       }
-      
-      await sleep(randomDelay(3000, 6000));
+    } catch (error) {
+      if (error.message === 'RATE_LIMITED') {
+        log('  ⚡ Rate limit hit - skipping entire deck for now', 'warning');
+        return cardCount;
+      }
+      throw error;
     }
     
-    if (cardCount > 0) {
-      log('Completed ' + cardCount + ' cards', 'success');
-    } else {
-      log('No new cards available', 'info');
-    }
-    
-    return cardCount;
+    await sleep(randomDelay(3000, 6000));
   }
+  
+  if (cardCount > 0) {
+    log('Completed ' + cardCount + ' cards', 'success');
+  } else {
+    log('No new cards available', 'info');
+  }
+  
+  return cardCount;
+}
 
   async fetchCampaigns() {
     try {
