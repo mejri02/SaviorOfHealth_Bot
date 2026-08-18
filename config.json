@@ -1,5 +1,4 @@
 {
-  "useGroqAI": true,
   "claimBadges": true,
   "syncBadges": true,
   "minBnbBalance": 0.0005,
@@ -19,11 +18,20 @@
   "stakeGoals": true,
   "stakeAmount": 10,
   "autoStake": true,
+  "useGroqAI": true,
   "maxCardsPerDay": 10,
   "delayBetweenAccounts": 5000,
   "delayBetweenRequests": 2000,
-  "groqTimeout": 10000,
-  "groqModels": ["openai/gpt-oss-20b", "qwen/qwen3.6-27b", "groq/compound"],
+  "groqTimeout": 15000,
+  "groqModels": [
+    "groq/compound",
+    "groq/compound-mini",
+    "qwen/qwen3.6-27b",
+    "allam-2-7b",
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-safeguard-20b"
+  ],
   "bscRpc": "https://bsc-dataseed.binance.org/",
   "badgeContract": "0xe0ad72abadf8ea43dd2e168bd97a24f8a04ada91",
   "chainId": 56,

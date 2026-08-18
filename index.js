@@ -39,8 +39,16 @@ function loadConfig() {
     maxCardsPerDay: 10,
     delayBetweenAccounts: 5000,
     delayBetweenRequests: 2000,
-    groqTimeout: 10000,
-    groqModels: ['llama3-70b-8192', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
+    groqTimeout: 15000,
+    groqModels: [
+      'groq/compound',
+      'groq/compound-mini',
+      'qwen/qwen3.6-27b',
+      'allam-2-7b',
+      'openai/gpt-oss-20b',
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-safeguard-20b'
+    ],
     bscRpc: 'https://bsc-dataseed.binance.org/',
     badgeContract: '0xe0ad72abadf8ea43dd2e168bd97a24f8a04ada91',
     chainId: 56,
@@ -317,7 +325,7 @@ class GroqManager {
     this.apiKeys = [];
     this.currentKeyIndex = 0;
     this.currentModelIndex = 0;
-    this.models = CONFIG.groqModels || ['qwen/qwen3.6-27b', 'openai/gpt-oss-20b', 'groq/compound'];
+    this.models = CONFIG.groqModels || ['groq/compound'];
     this.failedKeys = new Set();
     this.rateLimitedKeys = new Set();
     this.loadApiKeys();
@@ -368,6 +376,10 @@ class GroqManager {
     return this.models[this.currentModelIndex] || this.models[0];
   }
 
+  isGptOssModel(model) {
+    return model && model.startsWith('openai/gpt-oss');
+  }
+
   rotateKey() {
     if (this.apiKeys.length === 0) return null;
     this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
@@ -375,7 +387,7 @@ class GroqManager {
     const failedCount = this.failedKeys.size + this.rateLimitedKeys.size;
     const totalKeys = this.apiKeys.length;
     if (failedCount >= totalKeys) {
-      log('All ' + totalKeys + ' API keys exhausted (failed: ' + this.failedKeys.size + ', rate-limited: ' + this.rateLimitedKeys.size + ')', 'error');
+      log('All ' + totalKeys + ' API keys exhausted', 'error');
       this.failedKeys.clear();
       this.rateLimitedKeys.clear();
       log('Reset key states, retrying...', 'warning');
@@ -391,7 +403,7 @@ class GroqManager {
     }
 
     let attempts = 0;
-    const maxAttempts = Math.max(this.apiKeys.length * 2, 3);
+    const maxAttempts = Math.max(this.apiKeys.length * 2, 5);
 
     while (attempts < maxAttempts) {
       const key = this.getCurrentKey();
@@ -402,10 +414,35 @@ class GroqManager {
       }
 
       try {
+        const isGptOss = this.isGptOssModel(model);
+        let endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+        let requestBody;
+
         const prompt = "You are answering health survey questions. Answer naturally and concisely.\n\nQuestion: " + question + "\n" + (options ? "Options: " + options.join(", ") : "") + "\n\n" + (options ? "Respond with ONLY the option text you choose, nothing else." : "Give a 1-3 word honest response.");
 
+        if (isGptOss) {
+          endpoint = 'https://api.groq.com/openai/v1/responses';
+          requestBody = {
+            model: model,
+            input: prompt,
+            temperature: 0.5,
+            max_output_tokens: 30,
+            instructions: 'You are a helpful health assistant answering survey questions honestly and concisely.'
+          };
+        } else {
+          requestBody = {
+            model: model,
+            messages: [
+              { role: 'system', content: 'You are a helpful health assistant answering survey questions honestly and concisely.' },
+              { role: 'user', content: prompt }
+            ],
+            temperature: 0.5,
+            max_tokens: 30,
+          };
+        }
+
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), CONFIG.groqTimeout || 10000);
+        const timeoutId = setTimeout(() => controller.abort(), CONFIG.groqTimeout || 15000);
 
         const fetchOptions = {
           method: 'POST',
@@ -414,15 +451,7 @@ class GroqManager {
             'Authorization': 'Bearer ' + key,
             'User-Agent': getRandomUserAgent(),
           },
-          body: JSON.stringify({
-            model: model,
-            messages: [
-              { role: 'system', content: 'You are a helpful health assistant answering survey questions honestly and concisely.' },
-              { role: 'user', content: prompt }
-            ],
-            temperature: 0.5,
-            max_tokens: 30,
-          }),
+          body: JSON.stringify(requestBody),
           signal: controller.signal
         };
 
@@ -434,7 +463,7 @@ class GroqManager {
           }
         }
 
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', fetchOptions);
+        const response = await fetch(endpoint, fetchOptions);
         clearTimeout(timeoutId);
 
         if (response.status === 429) {
@@ -449,20 +478,60 @@ class GroqManager {
           continue;
         }
 
+        if (!response.ok) {
+          const errorText = await response.text();
+          log('API error ' + response.status + ': ' + errorText.substring(0, 100), 'error');
+          this.markKeyFailed(key);
+          await sleep(2000);
+          continue;
+        }
+
         const data = await response.json();
-        
-        if (data.choices && data.choices[0]) {
-          let answer = data.choices[0].message.content.trim();
-          
-          if (options && options.length > 0) {
-            for (const opt of options) {
-              if (answer.toLowerCase().includes(opt.toLowerCase()) || 
-                  opt.toLowerCase().includes(answer.toLowerCase())) {
-                return opt;
+        let answer = null;
+
+        if (isGptOss) {
+          if (data.output && Array.isArray(data.output)) {
+            for (const item of data.output) {
+              if (item.type === 'message' && item.content && item.content.length > 0) {
+                for (const contentItem of item.content) {
+                  if (contentItem.type === 'output_text' && contentItem.text) {
+                    answer = contentItem.text;
+                    break;
+                  }
+                }
+                if (answer) break;
               }
             }
-            return options[0];
           }
+          if (!answer && data.output_text) {
+            answer = data.output_text;
+          }
+        } else {
+          if (data.choices && data.choices[0] && data.choices[0].message) {
+            answer = data.choices[0].message.content;
+          }
+        }
+
+        if (!answer) {
+          log('No answer from Groq for model: ' + model, 'warning');
+          this.currentModelIndex = (this.currentModelIndex + 1) % this.models.length;
+          await sleep(1000);
+          continue;
+        }
+
+        answer = answer.trim();
+
+        if (options && options.length > 0) {
+          for (const opt of options) {
+            if (answer.toLowerCase().includes(opt.toLowerCase()) || 
+                opt.toLowerCase().includes(answer.toLowerCase())) {
+              return opt;
+            }
+          }
+          return options[0];
+        }
+
+        if (answer.length > 0) {
           return answer;
         }
 
@@ -479,7 +548,7 @@ class GroqManager {
         if (error.name === 'AbortError') {
           log('Groq request timeout (' + CONFIG.groqTimeout + 'ms)', 'warning');
         } else {
-          log('Groq request error: ' + error.message, 'error', { code: error.code, status: error.status });
+          log('Groq request error: ' + error.message, 'error');
         }
         this.rotateKey();
         await sleep(1000);
@@ -992,7 +1061,6 @@ class SaviorOfHealthBot {
       if (CONFIG.useGroqAI && this.groq.apiKeys.length > 0) {
         this.dailyStats.aiAttempts++;
         
-        // Wait before each Groq request to avoid rate limits
         await sleep(8000 + Math.random() * 4000);
         
         if (card.type === 'task') {
@@ -1010,7 +1078,6 @@ class SaviorOfHealthBot {
         }
         
         this.dailyStats.aiAnswers++;
-        // Wait after successful request to let rate limit reset
         await sleep(2000 + Math.random() * 3000);
         log('  Answer: ' + answer, 'debug');
         if (guess) log('  Guess: ' + guess + '%', 'debug');
@@ -1142,7 +1209,6 @@ class SaviorOfHealthBot {
           if (CONFIG.useGroqAI && this.groq.apiKeys.length > 0) {
             this.dailyStats.aiAttempts++;
             
-            // Wait before each Groq request to avoid rate limits
             await sleep(8000 + Math.random() * 4000);
             
             if (currentAsk.kind === 'text') {
