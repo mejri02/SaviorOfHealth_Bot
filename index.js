@@ -371,8 +371,18 @@ class GroqManager {
   rotateKey() {
     if (this.apiKeys.length === 0) return null;
     this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
-    log('Rotated API key', 'rotate');
-    return this.apiKeys[this.currentKeyIndex];
+    const newKey = this.apiKeys[this.currentKeyIndex];
+    const failedCount = this.failedKeys.size + this.rateLimitedKeys.size;
+    const totalKeys = this.apiKeys.length;
+    if (failedCount >= totalKeys) {
+      log('All ' + totalKeys + ' API keys exhausted (failed: ' + this.failedKeys.size + ', rate-limited: ' + this.rateLimitedKeys.size + ')', 'error');
+      this.failedKeys.clear();
+      this.rateLimitedKeys.clear();
+      log('Reset key states, retrying...', 'warning');
+    } else {
+      log('Rotated API key (' + (failedCount) + '/' + totalKeys + ' keys bad)', 'rotate');
+    }
+    return newKey;
   }
 
   async ask(question, options = null, proxyManager = null) {
@@ -468,11 +478,10 @@ class GroqManager {
       } catch (error) {
         if (error.name === 'AbortError') {
           log('Groq request timeout (' + CONFIG.groqTimeout + 'ms)', 'warning');
-          this.rotateKey();
         } else {
-          log('Groq request error: ' + error.message, 'warning');
-          this.rotateKey();
+          log('Groq request error: ' + error.message, 'error', { code: error.code, status: error.status });
         }
+        this.rotateKey();
         await sleep(1000);
       }
 

@@ -1,5 +1,5 @@
 {
-  "useGroqAI": false,
+  "useGroqAI": true,
   "claimBadges": true,
   "syncBadges": true,
   "minBnbBalance": 0.0005,
