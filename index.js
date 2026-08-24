@@ -42,12 +42,7 @@ function loadConfig() {
     groqTimeout: 15000,
     groqModels: [
       'groq/compound',
-      'groq/compound-mini',
-      'qwen/qwen3.6-27b',
-      'allam-2-7b',
-      'openai/gpt-oss-20b',
-      'openai/gpt-oss-120b',
-      'openai/gpt-oss-safeguard-20b'
+      'groq/compound-mini'
     ],
     bscRpc: 'https://bsc-dataseed.binance.org/',
     badgeContract: '0xe0ad72abadf8ea43dd2e168bd97a24f8a04ada91',
@@ -377,7 +372,7 @@ class GroqManager {
   }
 
   isGptOssModel(model) {
-    return model && model.startsWith('openai/gpt-oss');
+    return model && (model.startsWith('openai/gpt-oss') || model.startsWith('groq/compound'));
   }
 
   rotateKey() {
