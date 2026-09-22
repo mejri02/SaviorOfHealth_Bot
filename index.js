@@ -41,8 +41,8 @@ function loadConfig() {
     delayBetweenRequests: 2000,
     groqTimeout: 15000,
     groqModels: [
-      'groq/compound',
-      'groq/compound-mini'
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b'
     ],
     bscRpc: 'https://bsc-dataseed.binance.org/',
     badgeContract: '0xe0ad72abadf8ea43dd2e168bd97a24f8a04ada91',
@@ -320,7 +320,7 @@ class GroqManager {
     this.apiKeys = [];
     this.currentKeyIndex = 0;
     this.currentModelIndex = 0;
-    this.models = CONFIG.groqModels || ['groq/compound'];
+    this.models = CONFIG.groqModels || ['openai/gpt-oss-120b'];
     this.failedKeys = new Set();
     this.rateLimitedKeys = new Set();
     this.loadApiKeys();
@@ -372,7 +372,7 @@ class GroqManager {
   }
 
   isGptOssModel(model) {
-    return model && (model.startsWith('openai/gpt-oss') || model.startsWith('groq/compound'));
+    return false;
   }
 
   rotateKey() {
@@ -421,7 +421,8 @@ class GroqManager {
             model: model,
             input: prompt,
             temperature: 0.5,
-            max_output_tokens: 30,
+            max_output_tokens: 500,
+            reasoning_effort: 'low',
             instructions: 'You are a helpful health assistant answering survey questions honestly and concisely.'
           };
         } else {
@@ -432,7 +433,7 @@ class GroqManager {
               { role: 'user', content: prompt }
             ],
             temperature: 0.5,
-            max_tokens: 30,
+            max_tokens: 500,
           };
         }
 

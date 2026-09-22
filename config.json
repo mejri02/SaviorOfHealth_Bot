@@ -24,8 +24,8 @@
   "delayBetweenRequests": 2000,
   "groqTimeout": 15000,
   "groqModels": [
-    "groq/compound",
-    "groq/compound-mini"
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b"
   ],
   "bscRpc": "https://bsc-dataseed.binance.org/",
   "badgeContract": "0xe0ad72abadf8ea43dd2e168bd97a24f8a04ada91",
